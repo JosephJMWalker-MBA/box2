@@ -1,6 +1,6 @@
 # BOX2 Coding-Agent Contract
 
-Read `README.md`, `docs/PRODUCT.md`, `docs/IMPLEMENTATION.md`, then `docs/LAUNCH.md` before coding. These are canonical. Build the smallest demonstrable slice before abstractions. Commit incremental working checkpoints with test evidence.
+Read `README.md`, `docs/OPERATING_MODEL_AND_EXECUTION_PLAN.md`, `docs/PRODUCT.md`, `docs/WEEKLY_TOP_5.md`, `docs/IMPLEMENTATION.md`, then `docs/LAUNCH.md` before coding. The integrated plan coordinates current scope and staged execution; domain rules, latest approved owner decisions and launch gates remain controlling. These are canonical. Build the smallest demonstrable slice before abstractions. Commit incremental working checkpoints with test evidence.
 
 ## Non-negotiables
 
