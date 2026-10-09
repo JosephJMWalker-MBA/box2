@@ -21,7 +21,8 @@ if ($result && isset($result['booking'])) {
 </section>
 <?php return; } if ($route==='/respond') return;
 $nights=query('SELECT * FROM show_nights WHERE end_at_utc>? ORDER BY show_date LIMIT 28',[utc()])->fetchAll();
-$nightId=filter_var($_POST['night_id']??$_GET['night']??($nights[0]['id']??null),FILTER_VALIDATE_INT);
+$sharedId=isset($_GET['show'])&&is_string($_GET['show'])?query('SELECT id FROM show_nights WHERE show_date=?',[$_GET['show']])->fetchColumn():false;
+$nightId=filter_var($_POST['night_id']??$_GET['night']??($sharedId?:($nights[0]['id']??null)),FILTER_VALIDATE_INT);
 $night=$nightId?query('SELECT * FROM show_nights WHERE id=?',[$nightId])->fetch():false;
 $slots=$night?availability((int)$night['id']):[];
 ?>

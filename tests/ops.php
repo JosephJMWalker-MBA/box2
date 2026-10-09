@@ -28,3 +28,13 @@ if(query('PRAGMA integrity_check')->fetchColumn()!=='ok') throw new RuntimeExcep
 echo "PASS consistent private backup, atomic synthetic restore, original slots preserved, integrity verified\n";
 command([dirname(__DIR__).'/bin/retention.php'],$environment);
 echo "PASS retention CLI runs without exposing private values\n";
+$setupEnvironment=getenv();$setupEnvironment['BOX2_CONFIG']=$directory.'/setup-config.php';
+$setupEnvironment['BOX2_STORAGE']=$directory.'/setup-data';
+$setupEnvironment['BOX2_SETUP_PASSWORD']='synthetic-setup-password';
+command([dirname(__DIR__).'/bin/setup.php','--local'],$setupEnvironment);
+$setup=require $setupEnvironment['BOX2_CONFIG'];
+if(!password_verify('synthetic-setup-password',$setup['admin_password_hash']) || strlen($setup['secret'])<32
+    || $setup['allow_bookings']!==false || $setup['venue_public_enabled']!==false
+    || (fileperms($setupEnvironment['BOX2_CONFIG'])&0777)!==0600) throw new RuntimeException('Setup security defaults failed.');
+command([dirname(__DIR__).'/bin/migrate.php'],$setupEnvironment);
+echo "PASS local setup hashes host password, generates private secret/config, leaves launch gates closed, and reruns migrations\n";

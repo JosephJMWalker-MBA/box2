@@ -91,5 +91,17 @@ try {
     $desk=request('/admin?night='.$night);http_check(str_contains($desk['body'],'&lt;script&gt;alert(1)&lt;/script&gt;'),'stored XSS escaped in host view');
     $logout=request('/admin/logout',['csrf'=>form_csrf($desk)]);
     http_check($logout['code']===302 && request('/admin')['code']===302,'logout revokes host session');
+    // Render a separately configured subpath and verify front controller + static assets.
+    $settings['base_url']=$base.'/box2';
+    file_put_contents($configFile,"<?php return ".var_export($settings,true).';');
+    $mounted=request('/box2/book?night='.$night);
+    http_check($mounted['code']===200 && str_contains($mounted['body'],$base.'/box2/assets/site.js'),'configured base path renders correct routes and asset URLs');
+    http_check(request('/box2/assets/site.js')['code']===200,'base-path JavaScript is served');
+    $permalink=request('/box2/book?show=2030-10-11');
+    http_check($permalink['code']===200 && str_contains($permalink['body'],'Show evening 2030-10-11')
+        && str_contains($permalink['body'],$base.'/box2/book?show=2030-10-11'),'show-date permalink and event metadata are canonical');
+    $throttledLogin=request('/box2/admin/login');$throttledCsrf=form_csrf($throttledLogin);
+    for($i=0;$i<3;$i++) request('/box2/admin/login',['csrf'=>$throttledCsrf,'password'=>'synthetic-wrong']);
+    http_check(request('/box2/admin/login',['csrf'=>$throttledCsrf,'password'=>'synthetic-wrong'])['code']===429,'host login brute-force attempts are throttled');
     echo "{$checks} HTTP checks passed. Synthetic artifacts: {$directory}\n";
 } finally {proc_terminate($server);proc_close($server);}

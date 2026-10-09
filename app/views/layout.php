@@ -5,7 +5,18 @@ $titles=['/book'=>'Book a set','/rules'=>'Performer orientation','/arrive'=>'Arr
     '/admin'=>'Host desk','/admin/login'=>'Host sign in','/respond'=>'Your booking','/withdraw'=>'Writer permissions'];
 $title=$titles[$route]??$title;
 $canonical=url($route);
-if ($route==='/book' && isset($_GET['night']) && ctype_digit((string)$_GET['night'])) $canonical.='?night='.(int)$_GET['night'];
+if ($route==='/book') {
+    $sharedNight=false;
+    if (isset($_GET['show']) && is_string($_GET['show']) && preg_match('/^\d{4}-\d{2}-\d{2}$/D',$_GET['show'])) {
+        $sharedNight=query('SELECT show_date,status FROM show_nights WHERE show_date=?',[$_GET['show']])->fetch();
+    } elseif (isset($_GET['night']) && is_string($_GET['night']) && ctype_digit($_GET['night'])) {
+        $sharedNight=query('SELECT show_date,status FROM show_nights WHERE id=?',[(int)$_GET['night']])->fetch();
+    }
+    if ($sharedNight) {
+        $canonical.='?show='.$sharedNight['show_date'];
+        $title='Show evening '.$sharedNight['show_date'].' · '.$sharedNight['status'];
+    }
+}
 ?>
 <!doctype html>
 <html lang="en">

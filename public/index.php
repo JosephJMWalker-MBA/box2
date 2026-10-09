@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 ini_set('display_errors','0');error_reporting(E_ALL);
-require dirname(__DIR__).'/app/bootstrap.php';
+require_once dirname(__DIR__).'/app/bootstrap.php';
 header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: no-referrer');
 header('X-Frame-Options: DENY');
@@ -38,7 +38,8 @@ try {
         elseif ($route==='/withdraw') {throttle('withdraw',12);withdraw_writer(field($_POST,'token',64,true));$notice='Future production permission withdrawn. Previously published copies are not recalled.';}
         elseif ($route==='/admin/login') {
             throttle('login',5,900);
-            $password=field($_POST,'password',200,true);
+            $password=$_POST['password']??'';
+            if (!is_string($password) || $password==='' || strlen($password)>72) throw new InvalidArgumentException('Unable to sign in. Check your password.');
             if (config()['admin_password_hash']==='' || !password_verify($password,config()['admin_password_hash'])) {
                 throw new InvalidArgumentException('Unable to sign in. Check your password.');
             }

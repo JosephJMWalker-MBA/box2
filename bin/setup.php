@@ -11,8 +11,9 @@ if (!$password) {
     system('stty -echo');
     try {$password=rtrim(fgets(STDIN),"\r\n");} finally {system('stty echo');fwrite(STDOUT,"\n");}
 }
-if (strlen($password)<12) {fwrite(STDERR,"Password must have at least 12 characters.\n");exit(1);}
+if (strlen($password)<12 || strlen($password)>72) {fwrite(STDERR,"Password must have 12-72 bytes.\n");exit(1);}
 $settings=require dirname(__DIR__).'/config.example.php';
+$settings['storage_path']=getenv('BOX2_STORAGE')?:$settings['storage_path'];
 $settings['secret']=bin2hex(random_bytes(32));
 $settings['admin_password_hash']=password_hash($password,PASSWORD_DEFAULT);
 if (in_array('--local',$argv,true)) $settings['environment']='local';

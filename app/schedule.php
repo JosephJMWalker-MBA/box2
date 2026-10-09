@@ -80,9 +80,9 @@ function availability(int $night): array
 {
     return query("SELECT s.id,s.start_at_utc,s.end_at_utc,s.visibility,
         CASE WHEN n.status='closed' OR s.status='closed' THEN 'closed'
-         WHEN s.visibility='hold' THEN 'held'
          WHEN b.id IS NOT NULL THEN 'booked'
-         WHEN s.start_at_utc <= ? THEN 'closed' ELSE 'available' END AS state
+         WHEN s.start_at_utc <= ? THEN 'closed'
+         WHEN s.visibility='hold' THEN 'held' ELSE 'available' END AS state
         FROM slots s JOIN show_nights n ON n.id=s.show_night_id
         LEFT JOIN bookings b ON b.slot_id=s.id AND b.status!='cancelled'
         WHERE n.id=? ORDER BY s.start_at_utc", [utc(), $night])->fetchAll();
@@ -111,7 +111,8 @@ function override_night(int $id, array $data): void
     transaction(function () use ($id,$status,$note,$guest,$from,$until): void {
         $slots = query('SELECT * FROM slots WHERE show_night_id=? ORDER BY start_at_utc', [$id])->fetchAll();
         $active = (int) query("SELECT count(*) FROM bookings b JOIN slots s ON s.id=b.slot_id WHERE s.show_night_id=? AND b.status!='cancelled'", [$id])->fetchColumn();
-        if ($active && $status==='closed') throw new InvalidArgumentException('Cancel existing bookings and notify affected performers before closing this show.');
+        $pending=(int)query("SELECT count(*) FROM bookings b JOIN slots s ON s.id=b.slot_id WHERE s.show_night_id=? AND b.status IN ('booked','confirmed','checked_in')",[$id])->fetchColumn();
+        if ($pending && $status==='closed') throw new InvalidArgumentException('Cancel existing bookings and notify affected performers before closing this show.');
         if ($active && (!$slots || $slots[0]['start_at_utc'] !== utc($from) || end($slots)['end_at_utc'] !== utc($until))) {
             throw new InvalidArgumentException('Cancel affected bookings first; occupied slots cannot be moved.');
         }

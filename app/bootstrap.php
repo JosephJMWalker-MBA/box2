@@ -19,7 +19,7 @@ function config(?array $override = null): array
             if ($public && ($real===$public || str_starts_with($real,$public.'/'))) {
                 throw new RuntimeException('Private configuration must be outside public/.');
             }
-            $documentRoot=realpath($_SERVER['DOCUMENT_ROOT']??'');
+            $documentRoot=empty($_SERVER['DOCUMENT_ROOT'])?false:realpath($_SERVER['DOCUMENT_ROOT']);
             if ($documentRoot && ($real===$documentRoot || str_starts_with($real,$documentRoot.'/'))) {
                 throw new RuntimeException('Private configuration must be outside the server document root.');
             }

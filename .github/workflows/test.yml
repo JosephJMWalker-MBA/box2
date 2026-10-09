@@ -1,0 +1,20 @@
+name: PHP MVP checks
+on: [push, pull_request]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ['8.2', '8.5']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: pdo_sqlite, mbstring, fileinfo, pcntl
+          coverage: none
+      - run: find app public bin deploy tests -name '*.php' -print0 | xargs -0 -n1 php -l
+      - run: php tests/run.php
+      - run: php tests/http.php
+      - run: php tests/ops.php
+      - run: node --check public/assets/site.js
