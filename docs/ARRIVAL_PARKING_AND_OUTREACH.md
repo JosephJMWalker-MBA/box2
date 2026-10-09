@@ -33,7 +33,7 @@ In the owner's markup: **BLUE is the intended vehicle route**, including **1 low
 
 ## Public visitor instructions
 
-**Arrive on time, not early.** Arrive no more than **20 minutes before** your booked set; check in and wait in the designated lobby. BOX2 spaces are for actively arriving/departing performers. Use **only designated green-marked BOX2 bays** beside the long white building. If full, contact the host; **do not improvise parking in residential, shared, or access areas**. Follow the displayed blue preferred arrival/exit flow when safe and legal. Keep all red-marked areas and driveways completely open. Do not confront a blocking driver; inform the host. Keep voices, headlights and exterior noise considerate of neighboring homes; leave promptly after your set. **Focus on stage time. Socialize online.**
+**Arrive on time, not early.** **Approved window: 10–20 minutes before** your booked set; **check in upon arrival** and be **on deck 10 minutes before** your stage time. Do not arrive more than 20 minutes early; wait in the designated lobby until called. BOX2 spaces are for actively arriving/departing performers. Use **only designated green-marked BOX2 bays** beside the long white building. If full, contact the host; **do not improvise parking in residential, shared, or access areas**. Follow the displayed blue preferred arrival/exit flow when safe and legal. Keep all red-marked areas and driveways completely open. Do not confront a blocking driver; inform the host. Keep voices, headlights and exterior noise considerate of neighboring homes; leave promptly after your set. **Focus on stage time. Socialize online.**
 
 ## Publication workflow and code requirements
 
