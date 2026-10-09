@@ -32,6 +32,12 @@ Owner personally expects to perform **at least twice per BOX2 night**, unless vi
 6. **Legal / privacy**: terms, privacy disclosure, consent scope, no originality adjudication, VOD policy, recording/retention. Do not promise that VOD expiration eliminates third-party copies.
 7. **Sharing**: share-friendly Open Graph/Twitter cards and canonical permalinks for published events/clips; a one-tap Facebook share URL and a Reddit submit link; native share sheet on mobile with copy-link fallback. **No Reddit API integration, bot posting, content scraping, or reader comment ingest.**
 
+## Live studio visual identity and broadcast operations
+
+**Live studio milestone (Oct. 9, 2026):** owner demonstrated an active OBS stream preview featuring the Reolink wide-shot camera, colorful jukebox and renovation-stage room. This is verified only as an **active OBS session at that moment**, not Twitch viewer playback, safe public access, stream delay, isolated recording or deployment of the new website. Owner has restricted the room from further dog access and intends to build **black-painted walls and floor as the initial backdrop**, optionally inviting selected contributing comedians over time to add safe, consensual **galaxy/star paint marks** on a designated wall/backdrop. This is evolving physical production design, *not* a mandatory contest, reward system or reason to publish images without consent. Clean and safely prepare old surfaces, use rated slip-resistant floor coatings and preserve contrasting stage edges/exits; keep renovation hazards away from guests. See [LIVE_STUDIO_AND_GALAXY_SET.md](LIVE_STUDIO_AND_GALAXY_SET.md) for operator safety, OBS scene and privacy checks.
+
+The stream may feature owner project talks, jokes, painting/room improvement, approved sketches and house promotions **between** scheduled sets. Clear booking invitation (“Bored yet? Book a slot and take over the stage.”) means a scheduled interruption, not immediate access. Do not show performer names/on-deck identity without specific permission, and never confuse a holding graphic with stopping the actual camera/audio and any recording. The weekly rights-approved Top 5 remains the signature broadcast-derived product; the raw stream is an optional, truthful window into a working studio.
+
 ## Live room culture (use readable user-facing language)
 
 - **Sober stage:** no alcohol/drugs at BOX2; avoid false safety assurances.
