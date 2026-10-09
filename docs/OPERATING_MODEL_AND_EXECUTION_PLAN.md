@@ -41,6 +41,10 @@
 - **Timestamp provenance:** actual authorized recordings may document that a named person performed a particular joke at an observed time, not prove they invented it first or constitute copyright registration. Don't build fake originality certificates.
 - **Data:** protect contact, legal name, scripts, writer drafts and guest identity from public pages, streaming graphics, metadata, analytics, and exported social posts. Set explicit retention, deletion, backup and access rules. Consent to broadcast/feature/advertising are never conflated.
 
+## Current live studio milestone and evolving set (2026-10-09)
+
+Owner demonstrated an OBS session actively streaming the **Reolink camera** view of the rehearsal room, including the existing lit jukebox and renovation area. Owner reports the room is now physically closed to dogs, and will progressively prepare/paint **walls and floor black**, with optional safe star/galaxy paint additions by contributing comedians over time. **OBS broadcasting is underway**, but this is separate from new Codex website deployment, public visitor access, third-party Twitch playback, proven streaming delay, VOD consent and private audio/video shutdown. Treat the studio renovation as real physical work with appropriate cleaning of old animal waste, moisture assessment, floor-rated slip-resistant coatings, visible stage edges/exits, ventilation/cure and removal of ladders/tools before entry. **Do not require a digital reward program or leaderboard for the galaxy wall.** See [LIVE_STUDIO_AND_GALAXY_SET.md](LIVE_STUDIO_AND_GALAXY_SET.md) for the current operational checklist, scene-state safety requirements and cutover dependencies. Last Chrome screenshot of the legacy BOX2 site still showed “Not Secure” even though the certificate was listed valid; diagnose before accepting PII.
+
 ## Live production format — new, not implemented
 
 A minimal **broadcast state machine** should be designed around the existing admin rather than inventing a separate CMS:
