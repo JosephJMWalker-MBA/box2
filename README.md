@@ -7,6 +7,7 @@ This repository is the **canonical source for the new BOX2 site**, replacing an 
 ## Build handoff
 
 - Read [AGENTS.md](AGENTS.md) for implementation invariants.
+- Read [docs/OPERATING_MODEL_AND_EXECUTION_PLAN.md](docs/OPERATING_MODEL_AND_EXECUTION_PLAN.md) for the complete business model, current PR inventory, gap analysis and release sequence.
 - Read [docs/PRODUCT.md](docs/PRODUCT.md) for product, audience, program, stage culture, and consent requirements.
 - Read [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for data model, PHP/SQLite stack, rollout phases, and tests.
 - Read [docs/LAUNCH.md](docs/LAUNCH.md) before touching DNS, SSL, deployment, or publicity.
