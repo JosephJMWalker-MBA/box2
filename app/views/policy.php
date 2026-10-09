@@ -1,0 +1,18 @@
+<section class="page-heading"><p class="eyebrow">POLICY VERSION <?= e(BOX2_TERMS) ?></p><h1><?= $route==='/privacy'?'Keep it private.':'Your work stays yours.' ?></h1></section>
+<section class="panel policy">
+<?php if ($route==='/privacy'): ?>
+<h2>What is stored</h2><p>Stage name, optional full name, contact details, schedule, permissions, optional script, acknowledgments, and host status are private server-side records. Writer submissions and grants are private. Authorized hosts can access them to run the room.</p>
+<p>Booking links carry opaque authorization tokens. Do not share them. We do not place contact details or scripts in analytics, social cards, share URLs, or browser storage.</p>
+<h2>Retention + controls</h2><p>The operator runs retention cleanup: completed/cancelled/no-show bookings and writer submissions expire after <?= (int)config()['retention_days'] ?> days. Open bookings remain until resolved. Backup expiration is managed separately. Request correction or deletion through the host; prospective withdrawal is available for unused writer submissions.</p>
+<h2>External services</h2><p>Twitch embeds load only on configured HTTPS hosts. Twitch and share platforms apply their own policies. Facebook and Reddit buttons share the public page only. No Meta Pixel, SMS, automated social posting, audience counters, or third-party marketing tracking is active in this MVP.</p>
+<p>Session cookies support forms and host login. Short-lived keyed IP digests throttle spam; raw addresses and private content are not written to application logs.</p>
+<?php else: ?>
+<h2>Performance and original work</h2><p>BOX2 offers rehearsal/development opportunities, not guaranteed performance, audience size, laughs, feedback, clips, awards, or selection. You retain ownership of your original material. Submit only material you have rights to use.</p>
+<h2>Permission scope</h2><p>Livestream, BOX2 archival recording (<?= (int)config()['vod_retention_days'] ?> days), host short clips, creative adaptation, and moderated feedback are separate choices. Adaptation does not transfer ownership. Contact the host before production to change prospective permissions. Candidate tags do not authorize publication.</p>
+<p>Live-only requires the host to disable VOD and local recording; no highlight reuse is permitted. Private rehearsal requires streaming and recording actually stopped. The app cannot control cameras or OBS. Twitch or viewers may retain independent copies; archive expiry cannot erase those copies.</p>
+<h2>Writer grants</h2><p>Host performance, public/video release, AI/visual adaptation, and music/Suno adaptation are independent grants, default off. Checked grants authorize that use with your preferred credit. You may withdraw prospectively before production begins; previously lawfully published copies are not recalled.</p>
+<h2>Orientation and venue</h2><p>Follow sober-stage, original-comedy, neighborhood, arrival, hygiene, attention, and timing rules. Operational venue access is published only after verification. Use normal awareness in a workspace undergoing improvement.</p>
+<h2>Evidence limits</h2><p>A recorded set may document when it was performed. It does not establish original authorship, a global first performance, copyright registration, or provable theft. Performance receipts and automated media processing are not provided in this MVP.</p>
+<p>These draft terms must be reviewed against the venue's actual practices before public launch. Acceptance alone does not verify premises readiness.</p>
+<?php endif; ?>
+</section>

@@ -6,6 +6,7 @@ return [
     'base_url' => 'http://127.0.0.1:8080',
     'environment' => 'production', // local permits HTTP on loopback only.
     'storage_path' => __DIR__ . '/var',
+    'public_path' => __DIR__ . '/public',
     'secret' => '',
     'admin_password_hash' => '',
     'allow_bookings' => false,

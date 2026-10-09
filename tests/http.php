@@ -1,0 +1,95 @@
+<?php
+declare(strict_types=1);
+require dirname(__DIR__).'/app/bootstrap.php';
+$directory=sys_get_temp_dir().'/box2-http-'.bin2hex(random_bytes(6));mkdir($directory,0700,true);
+$socket=stream_socket_server('tcp://127.0.0.1:0',$number,$message);
+if (!$socket) throw new RuntimeException('Cannot bind local test socket: '.$message);
+$address=stream_socket_get_name($socket,false);fclose($socket);
+$base='http://'.$address;
+$settings=['storage_path'=>$directory,'base_url'=>$base,'secret'=>str_repeat('t',64),
+    'admin_password_hash'=>password_hash('synthetic-host-password',PASSWORD_DEFAULT),'environment'=>'local',
+    'allow_bookings'=>true,'venue_public_enabled'=>true,'mail_transport'=>'disabled']+config();
+config($settings);migrate();
+$night=schedule_night('2030-10-11');
+$slots=availability($night);
+$configFile=$directory.'/test-config.php';
+file_put_contents($configFile,"<?php return ".var_export($settings,true).';');chmod($configFile,0600);
+$environment=getenv();$environment['BOX2_CONFIG']=$configFile;
+$server=proc_open([PHP_BINARY,'-S',$address,'-t',dirname(__DIR__).'/public',dirname(__DIR__).'/public/router.php'],
+    [0=>['pipe','r'],1=>['file',$directory.'/server.log','a'],2=>['file',$directory.'/server.log','a']],$pipes,null,$environment);
+if (!is_resource($server)) throw new RuntimeException('Cannot start PHP test server.');
+$cookie='';$checks=0;
+function http_check(bool $ok,string $label): void {global $checks;if(!$ok) throw new RuntimeException('FAIL: '.$label);$checks++;echo "PASS {$label}\n";}
+function request(string $path,?array $data=null): array {
+    global $base,$cookie;
+    $header='Cookie: '.$cookie."\r\n";
+    if($data!==null) $header.="Content-Type: application/x-www-form-urlencoded\r\n";
+    $context=stream_context_create(['http'=>['method'=>$data===null?'GET':'POST','header'=>$header,
+        'content'=>$data===null?'':http_build_query($data),'ignore_errors'=>true,'follow_location'=>0,'timeout'=>5]]);
+    $body=file_get_contents($base.$path,false,$context);
+    $headers=$http_response_header??[];
+    foreach($headers as $line) if(preg_match('/^Set-Cookie: ([^;]+)/i',$line,$match)) $cookie=$match[1];
+    preg_match('/\s(\d{3})\s/',$headers[0]??'',$code);
+    return ['code'=>(int)($code[1]??0),'body'=>$body?:'','headers'=>$headers];
+}
+function form_csrf(array $response): string {
+    preg_match('/name="csrf" value="([a-f0-9]+)"/',$response['body'],$match);
+    if(!isset($match[1])) throw new RuntimeException('CSRF field missing.');
+    return $match[1];
+}
+try {
+    for($attempt=0;$attempt<50;$attempt++) {
+        $probe=@fsockopen('127.0.0.1',(int)explode(':',$address)[1],$errno,$error,.1);
+        if($probe) {fclose($probe);break;}usleep(20000);
+    }
+    $home=request('/');http_check($home['code']===200,'home renders on real PHP server');
+    http_check(!str_contains($home['body'],$settings['secret']),'secret absent from public HTML');
+    http_check(str_contains(implode(' ',$home['headers']),"script-src 'self'"),'CSP disables inline script injection');
+    http_check(str_contains(implode(' ',$home['headers']),'HttpOnly'),'session cookie HttpOnly');
+    $book=request('/book?night='.$night);$csrf=form_csrf($book);
+    http_check($book['code']===200 && str_contains($book['body'],'data-orientation'),'booking renders accessible orientation');
+    http_check(!str_contains($book['body'],'onclick='),'no inline onclick-dependent onboarding');
+    $data=['csrf'=>$csrf,'slot_id'=>$slots[0]['id'],'night_id'=>$night,'stage_name'=>'HTTP Synthetic',
+        'email'=>'http-synthetic@example.test','performance_type'=>'standup','orientation_agreed'=>'1','terms_agreed'=>'1',
+        'livestream_allowed'=>'1','teleprompter_text'=>'PRIVATE_SCRIPT_SENTINEL'];
+    $bad=$data;unset($bad['csrf']);http_check(request('/book',$bad)['code']===422,'booking POST rejects missing CSRF');
+    $save=request('/book',$data);
+    http_check($save['code']===200 && str_contains($save['body'],'Your place in the room.'),'HTTP booking completes');
+    http_check(str_contains($save['body'],'Email confirmations and reminders are unavailable.'),'disabled email disclosed in actual confirmation');
+    http_check(!str_contains($save['body'],'PRIVATE_SCRIPT_SENTINEL'),'private script absent from confirmation');
+    http_check(request('/book',$data)['code']===422,'HTTP duplicate booking rejected');
+    $api=request('/api/slots?night='.$night);
+    http_check($api['code']===200 && !str_contains($api['body'],'http-synthetic') && !str_contains($api['body'],'PRIVATE_SCRIPT_SENTINEL'),'public slots contain no contact/script PII');
+    $database=query('SELECT id FROM bookings LIMIT 1')->fetchColumn();
+    preg_match('#href="([^"]+/respond\?action=confirm[^\"]+)"#',$save['body'],$match);
+    $link=html_entity_decode($match[1],ENT_QUOTES);$linkPath=substr($link,strlen($base));
+    $preview=request($linkPath);http_check(booking_record($database)['status']==='booked','link GET does not mutate booking (email scanners safe)');
+    parse_str(parse_url($linkPath,PHP_URL_QUERY),$actionData);$actionData['csrf']=form_csrf($preview);
+    http_check(request('/respond',$actionData)['code']===200 && booking_record($database)['status']==='confirmed','CSRF-protected confirmation link POST');
+    http_check(request('/respond',$actionData)['code']===422,'HTTP link replay rejected');
+    http_check(request('/admin')['code']===302,'admin redirects anonymous visitors');
+    http_check(request('/admin/action',['csrf'=>$csrf,'action'=>'performed','booking_id'=>$database])['code']===302,'anonymous admin POST rejected');
+    foreach(['/config.example.php','/config.local.php','/var/box2.sqlite','/app/bootstrap.php','/backups/data.sqlite','/uploads/guess.mp4'] as $path) {
+        $response=request($path);http_check($response['code']===404 && !str_contains($response['body'],$settings['secret']),'private path denied '.$path);
+    }
+    $login=request('/admin/login');$loginToken=form_csrf($login);
+    http_check(request('/admin/login',['csrf'=>$loginToken,'password'=>'wrong'])['code']===422,'invalid host password denied');
+    $before=$cookie;
+    http_check(request('/admin/login',['csrf'=>$loginToken,'password'=>'synthetic-host-password'])['code']===302,'valid host password signs in');
+    http_check($before!==$cookie,'session id rotates on login');
+    $adminPage=request('/admin?night='.$night);$adminToken=form_csrf($adminPage);
+    http_check($adminPage['code']===200 && str_contains($adminPage['body'],'PRIVATE_SCRIPT_SENTINEL'),'private script available to authenticated host only');
+    http_check(request('/admin/action',['csrf'=>'bad','action'=>'performed','booking_id'=>$database])['code']===422,'admin CSRF forgery rejected');
+    $state=request('/admin/action',['csrf'=>$adminToken,'action'=>'recording','night_id'=>$night,'mode'=>'public']);
+    http_check($state['code']===302,'host records actual broadcast acknowledgment');
+    http_check(request('/admin/action',['csrf'=>$adminToken,'action'=>'checked_in','booking_id'=>$database,'night_id'=>$night])['code']===422,'live-only check-in requires explicit VOD/recording acknowledgment');
+    $checkin=request('/admin/action',['csrf'=>$adminToken,'action'=>'checked_in','booking_id'=>$database,'night_id'=>$night,'no_archive_confirmed'=>'1']);
+    http_check($checkin['code']===302 && booking_record($database)['status']==='checked_in','real host check-in persists');
+    $writers=request('/writers');$writerToken=form_csrf($writers);
+    $writer=request('/writers',['csrf'=>$writerToken,'alias'=>'Synthetic Writer','text'=>'PRIVATE_WRITER_SENTINEL<script>alert(1)</script>','terms_agreed'=>'1']);
+    http_check($writer['code']===200 && str_contains($writer['body'],'Received privately.') && !str_contains($writer['body'],'PRIVATE_WRITER_SENTINEL'),'private writer receipt does not publish text');
+    $desk=request('/admin?night='.$night);http_check(str_contains($desk['body'],'&lt;script&gt;alert(1)&lt;/script&gt;'),'stored XSS escaped in host view');
+    $logout=request('/admin/logout',['csrf'=>form_csrf($desk)]);
+    http_check($logout['code']===302 && request('/admin')['code']===302,'logout revokes host session');
+    echo "{$checks} HTTP checks passed. Synthetic artifacts: {$directory}\n";
+} finally {proc_terminate($server);proc_close($server);}

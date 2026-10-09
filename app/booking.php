@@ -16,8 +16,9 @@ function consent(array $data): array
     return $flags;
 }
 
-function create_booking(array $data): array
+function create_booking(array $data,bool $walkIn=false): array
 {
+    if ($walkIn) require_admin();
     if (!bookings_open()) throw new RuntimeException('Booking is not enabled. Please return after the host announces opening.', 503);
     if (!flag($data,'orientation_agreed') || !flag($data,'terms_agreed')) {
         throw new InvalidArgumentException('Acknowledge performer orientation and the terms before booking.');
@@ -33,17 +34,18 @@ function create_booking(array $data): array
     $permissions = consent($data);
     $slotId = filter_var($data['slot_id'] ?? null, FILTER_VALIDATE_INT);
     if (!$slotId || $slotId < 1) throw new InvalidArgumentException('Choose an available stage block.');
-    return transaction(function () use ($stage,$full,$email,$phone,$social,$format,$script,$permissions,$slotId): array {
+    return transaction(function () use ($stage,$full,$email,$phone,$social,$format,$script,$permissions,$slotId,$walkIn): array {
         $slot = query('SELECT s.*,n.status AS night_status,n.show_date FROM slots s JOIN show_nights n ON n.id=s.show_night_id WHERE s.id=?',[$slotId])->fetch();
-        if (!$slot || $slot['night_status'] !== 'open' || $slot['status'] !== 'open' || $slot['visibility'] === 'hold'
+        if (!$slot || $slot['night_status'] !== 'open' || $slot['status'] !== 'open' || ($slot['visibility'] === 'hold' && !$walkIn)
             || $slot['start_at_utc'] <= utc()) throw new InvalidArgumentException('This block is no longer available.');
-        if (($slot['visibility'] === 'private') !== ($permissions['level'] === 'private')) {
+        if ($slot['visibility'] !== 'hold' && ($slot['visibility'] === 'private') !== ($permissions['level'] === 'private')) {
             throw new InvalidArgumentException('Private rehearsals must use a labelled off-stream block; public blocks require livestream permission.');
         }
         if (query("SELECT 1 FROM bookings WHERE slot_id=? AND status!='cancelled'",[$slotId])->fetchColumn()) {
             throw new InvalidArgumentException('This block was just booked. Choose another.');
         }
         $id = bin2hex(random_bytes(12));
+        if ($slot['visibility']==='hold') query('UPDATE slots SET visibility=? WHERE id=?',[$permissions['level']==='private'?'private':'public',$slotId]);
         query('INSERT INTO bookings(id,slot_id,stage_name,full_name,email,phone,social_handle,performance_type,
             consent_level,livestream_allowed,archive_allowed,clips_allowed,adaptation_allowed,feedback_allowed,
             teleprompter_text,terms_version,consented_at,orientation_version,created_at,updated_at)
@@ -53,6 +55,7 @@ function create_booking(array $data): array
              $script,BOX2_TERMS,utc(),BOX2_TERMS,utc(),utc()]);
         $links = issue_booking_links($id,$slot['start_at_utc']);
         schedule_reminders($id,$links);
+        if ($walkIn) audit('walk_in',$id);
         return ['booking' => booking_record($id), 'links' => $links];
     });
 }
@@ -110,10 +113,10 @@ function apply_booking_link(array $data): array
     });
 }
 
-function host_booking_action(string $id,string $action,string $note=''): void
+function host_booking_action(string $id,string $action,string $note='',bool $noArchiveConfirmed=false): void
 {
     require_admin();
-    transaction(function () use ($id,$action,$note): void {
+    transaction(function () use ($id,$action,$note,$noArchiveConfirmed): void {
         $booking=booking_record($id);
         if ($action==='note') {
             if (mb_strlen($note)>1000) throw new InvalidArgumentException('Host note is too long.');
@@ -124,6 +127,9 @@ function host_booking_action(string $id,string $action,string $note=''): void
                 $required=$booking['consent_level']==='private'?'confirmed_off':'public';
                 if ($booking['recording_mode']!==$required) {
                     throw new InvalidArgumentException('Set the host recording mode first. Private rehearsal requires actual streaming AND recording stopped.');
+                }
+                if ($booking['livestream_allowed'] && !$booking['archive_allowed'] && !$noArchiveConfirmed) {
+                    throw new InvalidArgumentException('Confirm Twitch VOD and local recording are disabled for this live-only set before check-in.');
                 }
                 $other=query("SELECT b.id FROM bookings b JOIN slots s ON s.id=b.slot_id WHERE s.show_night_id=? AND b.status='checked_in' AND b.consent_level='private' AND b.id!=?",[$booking['show_night_id'],$id])->fetchColumn();
                 if ($other) throw new InvalidArgumentException('Finish the checked-in private rehearsal before another set enters.');

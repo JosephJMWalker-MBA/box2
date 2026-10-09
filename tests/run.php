@@ -78,7 +78,11 @@ denied(fn()=>host_booking_action($p['id'],'highlight'),'private set cannot be a 
 host_booking_action($p['id'],'performed');set_recording_mode($night,'public');
 $live=payload((int)$slots[1]['id']);unset($live['archive_allowed'],$live['clips_allowed']);
 $l=create_booking($live)['booking'];denied(fn()=>host_booking_action($l['id'],'clip_this'),'live-only set cannot be clipped');
+denied(fn()=>host_booking_action($l['id'],'checked_in'),'live-only set requires VOD/recording-off acknowledgment');
+host_booking_action($l['id'],'checked_in','',true);check(booking_record($l['id'])['status']==='checked_in','live-only check-in allowed after actual host acknowledgment');
+create_booking(payload((int)$slots[23]['id']),true);check(query('SELECT visibility FROM slots WHERE id=?',[$slots[23]['id']])->fetchColumn()==='public','authorized host can import a held-block walk-in');
 $_SESSION=[];denied(fn()=>host_booking_action($l['id'],'checked_in'),'privileged action denied without auth');
+denied(fn()=>create_booking(payload((int)$slots[24]['id']),true),'walk-in import denied without host authentication');
 denied(fn()=>verify_csrf([]),'missing CSRF denied');
 denied(fn()=>verify_csrf(['csrf'=>str_repeat('0',64)]),'wrong CSRF denied');
 verify_csrf(['csrf'=>csrf()]);check(true,'valid CSRF accepted');
@@ -113,6 +117,16 @@ check($stats['accepted']===1 && $calls===1,'provider acceptance recorded once');
 process_reminders(function () use (&$calls): void {$calls++;});check($calls===1,'worker rerun does not redeliver');
 query("UPDATE reminders SET status='sending',claimed_at=? WHERE booking_id=? AND type='confirmation'",['2000-01-01T00:00:00Z',$l['id']]);
 check(process_reminders()['uncertain']===1,'crashed send quarantined instead of duplicated');
+query("UPDATE reminders SET status='pending',due_at_utc=?,attempt_count=0 WHERE booking_id=? AND type='confirmation'",[utc(),$l['id']]);
+check(process_reminders(fn()=>throw new MailAcceptanceUncertain('synthetic'))['uncertain']===1,'uncertain SMTP acceptance is not automatically retried');
+$_SESSION=['admin'=>true,'last_active'=>time()-1801];check(!admin(),'idle host session expires');
+config(['allow_bookings'=>false]+config());denied(fn()=>create_booking(payload((int)$slots[4]['id'])),'launch booking gate enforced server-side');
+config(['allow_bookings'=>true]+config());
+config(['environment'=>'production']+config());$_SERVER['HTTP_X_FORWARDED_PROTO']='https';
+check(!forms_ready(),'production HTTP and spoofed proxy headers cannot enable sensitive forms');
+config(['environment'=>'local']+config());
+$_SESSION=['admin'=>true,'last_active'=>time()];
+denied(fn()=>override_night($night,['status'=>'closed','start'=>'21:00','end'=>'02:00']),'show with active bookings cannot close silently');
 check(query('PRAGMA integrity_check')->fetchColumn()==='ok','database integrity');
 
 // Two independent PDO connections compete for one slot using actual processes.

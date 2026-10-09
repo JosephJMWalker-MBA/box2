@@ -7,10 +7,10 @@ function db(bool $reset = false): PDO
     if ($reset) $pdo = null;
     if ($pdo === null) {
         $directory = config()['storage_path'];
-        $public = realpath(dirname(__DIR__) . '/public');
+        $public = realpath(config()['public_path']);
         if (!is_dir($directory)) mkdir($directory, 0700, true);
         $real = realpath($directory);
-        if (!$real || $real === $public || str_starts_with($real, $public . DIRECTORY_SEPARATOR)) {
+        if (!$public || !$real || $real === $public || str_starts_with($real, $public . DIRECTORY_SEPARATOR)) {
             throw new RuntimeException('Storage must be outside the public document root.');
         }
         $pdo = new PDO('sqlite:' . $real . '/box2.sqlite', null, null,

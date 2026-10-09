@@ -111,6 +111,7 @@ function override_night(int $id, array $data): void
     transaction(function () use ($id,$status,$note,$guest,$from,$until): void {
         $slots = query('SELECT * FROM slots WHERE show_night_id=? ORDER BY start_at_utc', [$id])->fetchAll();
         $active = (int) query("SELECT count(*) FROM bookings b JOIN slots s ON s.id=b.slot_id WHERE s.show_night_id=? AND b.status!='cancelled'", [$id])->fetchColumn();
+        if ($active && $status==='closed') throw new InvalidArgumentException('Cancel existing bookings and notify affected performers before closing this show.');
         if ($active && (!$slots || $slots[0]['start_at_utc'] !== utc($from) || end($slots)['end_at_utc'] !== utc($until))) {
             throw new InvalidArgumentException('Cancel affected bookings first; occupied slots cannot be moved.');
         }

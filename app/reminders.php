@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+class MailAcceptanceUncertain extends RuntimeException {}
+
 function schedule_reminders(string $id,array $links): void
 {
     $booking=booking_record($id);
@@ -56,6 +58,10 @@ function process_reminders(?callable $transport=null): array
             query("UPDATE reminders SET status='accepted',sent_at=?,error_message='' WHERE id=? AND claim_id=?",
                 [utc(),$reminder['id'],$reminder['claim_id']]);
             $counts['accepted']++;
+        } catch (MailAcceptanceUncertain $exception) {
+            query("UPDATE reminders SET status='uncertain',error_message='Provider acceptance unknown; verify before requeuing.' WHERE id=? AND claim_id=?",
+                [$reminder['id'],$reminder['claim_id']]);
+            $counts['uncertain']++;
         } catch (Throwable $exception) {
             // Never persist provider responses, recipient PII or content in diagnostics.
             query("UPDATE reminders SET status='failed',error_message='Transport rejected or could not verify acceptance.',due_at_utc=? WHERE id=? AND claim_id=?",
@@ -102,7 +108,14 @@ function send_mail(string $to,string $subject,string $body): void
         $message=$headers.'To: '.$to."\r\nSubject: ".$encodedSubject."\r\n\r\n".$body;
         $message=str_replace(["\r\n","\r"],"\n",$message);
         $message=preg_replace('/^\./m','..',$message);
-        fwrite($socket,str_replace("\n","\r\n",$message)."\r\n.\r\n");$read([250]);
+        $outbound=str_replace("\n","\r\n",$message)."\r\n.\r\n";
+        $remaining=$outbound;
+        while ($remaining!=='') {
+            $written=fwrite($socket,$remaining);
+            if (!$written) throw new MailAcceptanceUncertain('SMTP DATA interrupted.');
+            $remaining=substr($remaining,$written);
+        }
+        try {$read([250]);} catch (Throwable $exception) {throw new MailAcceptanceUncertain('SMTP DATA acceptance unknown.',0,$exception);}
         // Acceptance is durable before QUIT; a QUIT disconnect must not trigger redelivery.
         fwrite($socket,"QUIT\r\n");
     } finally {fclose($socket);}

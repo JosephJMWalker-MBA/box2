@@ -15,6 +15,14 @@ function config(?array $override = null): array
         $config = require dirname(__DIR__) . '/config.example.php';
         $path = getenv('BOX2_CONFIG') ?: dirname(__DIR__) . '/config.local.php';
         if (is_file($path)) {
+            $real=realpath($path);$public=realpath(dirname(__DIR__).'/public');
+            if ($public && ($real===$public || str_starts_with($real,$public.'/'))) {
+                throw new RuntimeException('Private configuration must be outside public/.');
+            }
+            $documentRoot=realpath($_SERVER['DOCUMENT_ROOT']??'');
+            if ($documentRoot && ($real===$documentRoot || str_starts_with($real,$documentRoot.'/'))) {
+                throw new RuntimeException('Private configuration must be outside the server document root.');
+            }
             $config = (require $path) + $config;
         }
         $url = parse_url($config['base_url']);
