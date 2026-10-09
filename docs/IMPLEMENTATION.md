@@ -74,7 +74,7 @@ Build migrations, seed **synthetic** data for tests only (never seed fake comedi
 - On successful booking, provide confirmation and actionable signed Confirm/Cancel links. Require contact email, rate-limit and spam-protect public forms. Don't put phone/email/teleprompter in URLs, analytics, emails to other performers, client-side storage, or rendered HTML metadata.
 - **Approved arrival/check-in contract:** open the arrival window at stage start **minus 20 minutes**; planned arrival/check-in is within **T−20 to T−10**, checking in **upon arrival**; the performer must be **on deck at T−10**. Display window and on-deck time, not a fabricated check-in deadline of T−20. Confirmation must display **event/show date AND actual stage calendar date** for after-midnight slots, local timezone, arrival window and on-deck target.
 - Cancellation and confirmation link authorization must not reveal other people's data. Avoid emailing legal names unnecessarily.
-- For private slots, recording/stream state must be explicitly OFF at host level; warn and block check-in to private slot if host has not confirmed streaming stopped.
+- For private slots, **all stage/room media capture and recording must be confirmed OFF at host level**, including independent camera recording (Reolink SD/NVR/cloud) and microphones; warn/block check-in until verified. **The independent prerecorded house-ad/sketch broadcast may remain ON** only after the host confirms it is isolated from every room source and buffered/delayed output, with independent receiving-device verification. If verification fails, stop Twitch/OBS streaming and recording before check-in. A host UI checkbox is an acknowledgment, not actual source control. See [PRIVATE_REHEARSAL_BROADCAST_CONTINUITY.md](PRIVATE_REHEARSAL_BROADCAST_CONTINUITY.md).
 
 ## Reminder design
 
@@ -91,7 +91,7 @@ Avoid nuisance duplicates or reminders after status changes. Script runs from ho
 - Hardened login for host via HTTPS session and server-side password hash, login throttling, logout/session rotation, idle timeout, CSRF for every modification. No general public accounts. Never publish dashboard on stream.
 - View and filter tonight's real lineup; check in/no show/performed; mark candidate clips/laundry; host note; review submissions, toggle slots, exceptions, sanitize tasks, upload walkthrough, inspect pending/cancelled reminders.
 - Editing remote changes must reflect in public availability immediately.
-- Private rehearsal safety flow must be unambiguous; host acknowledges OBS/Twitch stream and recording stopped; explicit resumption before new public slots. App acknowledgment alone cannot actually control external OBS hardware, so don't claim automatic stop.
+- Private rehearsal safety flow must be unambiguous: distinguish **public broadcast state** from **studio room capture state**. Before check-in, require host acknowledgment that stage audio/video and every studio recorder/SD/NVR/cloud recorder are physically isolated/off, and that any continuing Twitch feed contains **only isolated prerecorded house media**, with latency/VOD tested from a separate viewer. If not proven, host stops the stream and local recording. Restore stage feed only after guest leaves and the next performer explicitly consents. The existing `confirmed_off` gate in PR #1 currently assumes full Twitch stop; change semantics/schema/UI only through a reviewed backward-compatible migration/test, and **keep old fail-closed behavior until end-to-end isolation is proven**. Do not claim OBS device control from a database flag.
 
 ## Public UX and sharing
 
@@ -109,7 +109,7 @@ Produce reproducible tests and a README with results. At minimum:
 - Exact local/UTC mapping for 9 PM and 1:50 AM, and tests across DST week(s).
 - Two concurrent/duplicate bookings cannot claim same slot, cancellation returns availability, signed links cannot be forged/replayed.
 - Missing/invalid email, oversize text, CSRF, XSS payload, request spam and privileged actions denied without login.
-- A live-only or private booking cannot be added to highlight publication; private set requires stream-stop acknowledgment.
+- A live-only or private booking cannot be added to highlight publication; a private set requires **room-capture-off verification**. A separate preapproved house program may remain live, but never a private person's images/audio/metadata.
 - Client can view public slots but cannot access DB, teleprompter, private submissions, logs, uploaded media or admin.
 - Reminder times for before and after midnight, cancellation, retries and disabled/unconfigured email.
 - Performance receipt is disabled or labelled pending until real timestamp/recording evidence exists.
