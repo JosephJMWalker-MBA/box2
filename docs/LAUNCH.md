@@ -1,6 +1,6 @@
 # BOX2 — Launch, Deployment and Risk Gates
 
-**Status:** launch checklist. No certificate repair, PHP hosting verification, email provider setup, publicly advertised event, or venue compliance review has been completed by creating this repository.
+**Status:** launch checklist. Updated host/OBS observations (2026-10-09): DirectAdmin showed a valid automatically renewing wildcard certificate for `*.yurrmom.com`, and owner set the account-global PHP version to 8.5 with PDO SQLite enabled in the panel; the parent website reportedly loaded on mobile. These observations do **not** verify actual web-SAPI configuration or complete HTTPS browser trust: the BOX2 legacy site still showed Chrome **“Not Secure”** with a valid certificate. Owner also demonstrated an OBS session actively streaming a studio camera scene; it does **not** establish consent-safe audio/video isolation, Twitch VOD settings, stream delay, or public performer/venue readiness. No production deployment, real email delivery, publicly advertised event or venue compliance review has been completed merely by updating this repository. See [LIVE_STUDIO_AND_GALAXY_SET.md](LIVE_STUDIO_AND_GALAXY_SET.md).
 
 ## Separate technical rebuild from production repair
 
