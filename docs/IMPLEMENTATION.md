@@ -72,7 +72,7 @@ Build migrations, seed **synthetic** data for tests only (never seed fake comedi
 - API can return booked/available slots without exposing performer PII. Re-query capacity server-side in an atomic write transaction. Double-submit, rapid concurrent requests, and cancellation reopens slot safely.
 - Mark reserved blocks as `held`; allow admin set holds and walk-ins.
 - On successful booking, provide confirmation and actionable signed Confirm/Cancel links. Require contact email, rate-limit and spam-protect public forms. Don't put phone/email/teleprompter in URLs, analytics, emails to other performers, client-side storage, or rendered HTML metadata.
-- Check-in deadline = stage start -20 min. Confirmation must display **event/show date AND actual stage calendar date** for after-midnight slots, local timezone, and deadline.
+- **Approved arrival/check-in contract:** open the arrival window at stage start **minus 20 minutes**; planned arrival/check-in is within **T−20 to T−10**, checking in **upon arrival**; the performer must be **on deck at T−10**. Display window and on-deck time, not a fabricated check-in deadline of T−20. Confirmation must display **event/show date AND actual stage calendar date** for after-midnight slots, local timezone, arrival window and on-deck target.
 - Cancellation and confirmation link authorization must not reveal other people's data. Avoid emailing legal names unnecessarily.
 - For private slots, recording/stream state must be explicitly OFF at host level; warn and block check-in to private slot if host has not confirmed streaming stopped.
 
@@ -82,8 +82,8 @@ Bookings create due reminders:
 1. Booking confirmation immediately (transactional).
 2. Day of show around **2:00 PM local**, only if future and after booking time.
 3. 2 hours before stage.
-4. 30 minutes before check-in deadline (50 minutes before stage).
-5. 10 minutes before stage, except skip as appropriate if already completed/cancelled.
+4. 30 minutes before the approved **arrival window opens** (50 minutes before stage); make its wording say when to arrive, not that check-in is due at T−20.
+5. 10 minutes before stage (**on-deck cue**), except skip as appropriate if already completed/cancelled. If a reminder type/name already exists for the prior T−20 policy, change its displayed meaning without silently replaying queued mail or breaking persisted reminders.
 Avoid nuisance duplicates or reminders after status changes. Script runs from host cron every five minutes. Persist durable send attempts with idempotency locking/claimed state; use proper From address/domain authentication. Confirmation/cancel links in reminder messages. **Email first; SMS only later with explicit SMS-specific permission and a configured vendor.** Silence/failure of mail provider should surface "email delivery unverified" and admin diagnostics, never pretend it was delivered.
 
 ## Admin / hosting UX
