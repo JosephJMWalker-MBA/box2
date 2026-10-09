@@ -18,7 +18,7 @@ Owner personally expects to perform **at least twice per BOX2 night**, unless vi
 - **Tuesday:** no regular BOX2 show; outside live performance (often Akron).
 - One Wednesday and one Friday per month may have outside engagements; dashboard must support **date-specific cancellations, adjusted hours, or designated guest hosts**, shown accurately to bookers.
 - Stage runs **10-minute allocation blocks**; default performance is **5 minutes** plus transitions, host riff, and buffer. 9 PM–2 AM = 30 blocks. Start with at most **22 online-bookable** and reserve remaining blocks for host discretion, walk-ins, overruns, and second attempts. Admin can configure which blocks are public.
-- Time and timezone shown clearly; check in **20 minutes before the scheduled set**. An after-midnight set belongs to the previous evening's show date.
+- **Owner-approved arrival policy (2026-10-09):** Arrive **10–20 minutes before** scheduled stage time (not earlier than T−20); **check in immediately upon arrival** and be **on deck by T−10**. A performer arriving at T−10 must check in and be ready at once; this is not a guaranteed late-arrival grace period. Publish the same window in onboarding, booking confirmations, arrival directions, reminder emails and host lineup. An after-midnight set belongs to the previous evening's show date.
 - Event may be lightly attended or have quiet gaps. **Do not promise a full house, guaranteed laughs, total views, guaranteed performance, or celebrity visits**.
 - Clear state: available / booked / confirmed / checked-in / performed / cancelled / no-show / held. Avoid double booking. Provide waitlist later only if needed.
 
