@@ -11,6 +11,7 @@ return [
     'admin_password_hash' => '',
     'allow_bookings' => false,
     'venue_public_enabled' => false,
+    'set_lengths' => [5, 10, 15], // Stage minutes; reserve 1, 2, 3 ten-minute allocations.
     'venue_address' => '2735 Harrison Ave NW, Canton, OH 44709',
     'arrival_text' => 'Arrival and parking instructions are awaiting host verification. Do not use this site as an invitation to walk in.',
     'twitch_channel' => 'cantonrefinery',

@@ -1,8 +1,8 @@
 <?php
 declare(strict_types=1);
 
-const BOX2_VERSION = '0.1.0';
-const BOX2_TERMS = '2026-10-08';
+const BOX2_VERSION = '0.2.0';
+const BOX2_TERMS = '2026-10-09';
 const BOX2_ZONE = 'America/New_York';
 
 function config(?array $override = null): array

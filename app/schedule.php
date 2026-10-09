@@ -78,14 +78,70 @@ function generate_schedule(string $firstDate, int $days = 28): array
 
 function availability(int $night): array
 {
-    return query("SELECT s.id,s.start_at_utc,s.end_at_utc,s.visibility,
+    $slots = query("SELECT s.id,s.start_at_utc,s.end_at_utc,s.visibility,
         CASE WHEN n.status='closed' OR s.status='closed' THEN 'closed'
          WHEN b.id IS NOT NULL THEN 'booked'
          WHEN s.start_at_utc <= ? THEN 'closed'
          WHEN s.visibility='hold' THEN 'held' ELSE 'available' END AS state
         FROM slots s JOIN show_nights n ON n.id=s.show_night_id
-        LEFT JOIN bookings b ON b.slot_id=s.id AND b.status!='cancelled'
+        LEFT JOIN booking_allocations a ON a.slot_id=s.id AND a.active=1
+        LEFT JOIN bookings b ON b.id=a.booking_id AND b.status!='cancelled'
         WHERE n.id=? ORDER BY s.start_at_utc", [utc(), $night])->fetchAll();
+    foreach ($slots as $index => &$slot) {
+        $slot['durations'] = fitting_set_lengths($slots, $index);
+        $slot['label'] = local_label($slot['start_at_utc']);
+    }
+    unset($slot);
+    return $slots;
+}
+
+function set_lengths(): array
+{
+    $lengths = config()['set_lengths'];
+    if (!is_array($lengths) || !$lengths || array_diff($lengths, [5, 10, 15])) {
+        throw new RuntimeException('Configure stage set lengths using 5, 10, or 15 minutes.');
+    }
+    $lengths = array_values(array_unique(array_map('intval', $lengths)));
+    sort($lengths);
+    return $lengths;
+}
+
+function fitting_set_lengths(array $slots, int $index): array
+{
+    $first = $slots[$index];
+    if ($first['state'] !== 'available') return [];
+    $lengths = [];
+    foreach (set_lengths() as $duration) {
+        for ($offset = 0; $offset < $duration / 5; $offset++) {
+            $slot = $slots[$index + $offset] ?? null;
+            $expected = utc((new DateTimeImmutable($first['start_at_utc']))->modify('+' . ($offset * 10) . ' minutes'));
+            if (!$slot || $slot['state'] !== 'available' || $slot['visibility'] !== $first['visibility']
+                || $slot['start_at_utc'] !== $expected
+                || strtotime($slot['end_at_utc']) - strtotime($slot['start_at_utc']) !== 600) {
+                continue 2;
+            }
+        }
+        $lengths[] = $duration;
+    }
+    return $lengths;
+}
+
+function arrival_times(string $stage): array
+{
+    $instant = new DateTimeImmutable($stage);
+    return ['opens_at_utc' => utc($instant->modify('-20 minutes')),
+        'on_deck_at_utc' => utc($instant->modify('-10 minutes'))];
+}
+
+function arrival_window(string $stage): string
+{
+    $times = arrival_times($stage);
+    return local_label($times['opens_at_utc']) . ' – ' . local_label($times['on_deck_at_utc']);
+}
+
+function time_range(string $start, string $end): string
+{
+    return local_label($start) . ' – ' . local_label($end);
 }
 
 function local_label(string $instant): string

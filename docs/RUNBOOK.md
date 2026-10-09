@@ -1,8 +1,11 @@
 # BOX2 MVP Runbook
 
-Version 0.1.0. Implementation/test evidence only; no production deployment,
+Version 0.2.0. Implementation/test evidence only; no production deployment,
 certificate repair, mail delivery, public venue access, or Twitch playback claim.
 `PRODUCT.md`, `IMPLEMENTATION.md`, `LAUNCH.md`, and `AGENTS.md` remain canonical.
+`LEGACY_UI_RECONCILIATION.md` and `ARRIVAL_PARKING_AND_OUTREACH.md` supersede
+legacy visual references and parking/arrival instructions. Main through
+`adc1f3a` was reconciled into the PR branch without replacing the implementation.
 
 ## Local and staging setup
 
@@ -43,6 +46,9 @@ Configure values after host verification; do not publish secret values:
   parking, walk, entry, access, and restroom instructions; no invented permissions.
 - `allow_bookings`: enable only after infrastructure, consent/terms, venue,
   cancellation, persistence, mail unavailable/delivery behavior, and host checks.
+- `set_lengths`: configurable subset of `[5,10,15]` stage minutes, requiring
+  respectively 1/2/3 adjacent ten-minute calendar allocations. UI choices derive
+  from real contiguous capacity; the server rechecks every allocation atomically.
 - `twitch_channel=cantonrefinery`; `twitch_parents`: actual hostname(s), no
   scheme/path. Embed requires HTTPS and the configured serving host. On screens
   too narrow for Twitch's minimum player width, use the external watch link.
@@ -97,6 +103,58 @@ are generated closed with a visible note; the host must explicitly adjust valid
 hours and open blocks. Ambiguous endpoints are rejected. A regular night has
 30 ten-minute allocations; 22 public, six held, two private.
 
+### Arrival and set-length contract
+
+Arrive **T−20 through T−10**, never earlier; **check in immediately upon arrival**
+and be **on deck at T−10**. Arriving at T−10 requires check-in and readiness at
+once, not a guaranteed grace period. `arrival_times()` supplies UTC targets;
+receipt, host, and email display helpers preserve the actual calendar date/time
+and timezone, including windows crossing midnight or a repeated DST hour.
+
+Five stage minutes reserve ten calendar minutes, ten reserve twenty, and fifteen
+reserve thirty. The full reservation includes host/reset buffer. `bookings`
+stores `duration_minutes` and `block_count`; `booking_allocations` reserves every
+underlying slot with a unique active-slot index. A booking cannot span held,
+closed, missing, occupied, or mixed private/public allocations. Hosts may import
+authorized walk-ins into compatible held blocks. Cancelled allocations become
+inactive but retain history; every block reopens together. Slot identities stay
+immutable across schedule edits. Host views distinguish stage end from reserved
+calendar end. Default permissions remain off; longer public sets do not require
+clip or archive permission beyond the explicitly selected livestream grant.
+
+The nine shared `/rules` cards drive progressive onboarding. No browser storage
+remembers an old acceptance; new bookings must report the current orientation
+version (`2026-10-09`). Back/forward navigation and schedule fetches preserve
+entered performer data and explicit grants in the current form. Without JS,
+all nine cards and the full form remain readable and server validation still
+checks capacity and consent. Dynamic start filtering uses JS; without it the
+server can reject a longer choice that no longer fits.
+
+Parking maps, exact bays, entrances, accessible routing, and public venue access
+remain unapproved. No generated map, third-party overflow parking, private/VIP
+route, or invented geometry is supplied. `/arrival` is an honest unpublished
+walkthrough state until approval; `/arrive` remains a compatible alias. Address,
+configured directions, videos, and the public arrival navigation link stay
+behind `venue_public_enabled`. Hosts must verify actual rights, routes, premises,
+and cleaning procedures before opening either permission gate.
+
+### Upgrade from 0.1.0
+
+Migration `002.sql` adds length fields and backfills each existing booking as a
+five-minute/one-allocation reservation. It preserves cancelled history and
+original consent versions. Existing links, IDs, contact privacy, tokens, and
+queue entries are retained. The cancellation trigger releases all active
+allocations in the same transaction. Back up before migration and test restore.
+
+Migration and the worker refresh only eligible unsent legacy payloads to the
+approved arrival wording while preserving original links, due times, attempt
+counts and states. Persisted `check_in_30` remains its original type/unique key,
+but displays as an **arrival reminder**; `stage_10` displays as an **on-deck cue**.
+Accepted, claimed, uncertain, and skipped messages are not rewritten or replayed.
+Malformed old payloads become `uncertain` for host review rather than being sent.
+Hosts must notify already-booked performers of material policy changes; the
+upgrade does not fabricate a new consent acknowledgment or send old mail again.
+
 Admin can close a night only after cancelling existing bookings and notifying
 performers. Cancellation stops future reminders but does not currently send a
 separate cancellation email; host notification is an explicit operational step.
@@ -138,7 +196,8 @@ Configure cron using the actual PHP binary, private config, and release paths:
 ```
 
 Book commits enqueue confirmation immediately plus future day-of 14:00, stage
-minus two hours, check-in minus 30 minutes, and stage minus ten minutes. Dates
+minus two hours, arrival-window opening minus 30 minutes (T−50), and the
+on-deck cue at stage minus ten minutes. Dates
 use the show's evening, not the after-midnight stage date. The worker claims
 rows in an atomic write transaction; other workers cannot claim the same row.
 Retries stop after three attempts with backoff. Cancelled/no-show/performed
@@ -192,15 +251,22 @@ Local tests run on PHP 8.5.7 / PDO SQLite and isolated Chrome:
   Show-date canonical permalinks and configured subpath assets are exercised.
 - Synthetic backup/restore drill: consistent private snapshot, atomic restore,
   preserved slots, integrity check, retention CLI.
-- Browser suite: first card advances exactly one step, back navigation,
-  keyboard completion, real form submit, host login, no JS errors, 360px/1280px
+- Adjacent-block suite: 5/10/15 availability and reservations, overlapping
+  different-start process race, full cancellation release, midnight and repeated
+  DST-hour durations, withheld/closed boundaries, comedy categories, stale
+  orientation rejection, private recording and live-only clip restrictions.
+- Upgrade/outbox suite: additive migration, historical reservations/consent,
+  token continuity, unchanged queue IDs/attempts/claims/due times and no replay.
+- Browser suite: nine cards, exactly one step per acknowledgment, back navigation,
+  keyboard completion, three booking steps, actual length filtering and preserved
+  input during night changes, full form submit, host login, no JS errors, 360px/1280px
   layout without horizontal overflow. Screenshots generated outside repository.
 - PHP lint and vanilla JS syntax. GitHub CI additionally targets PHP 8.2/8.5;
   see PR checks for remotely completed evidence.
 
-Latest local run: 78 backend checks, 38 HTTP checks, the setup/backup/restore/
-retention drill, and the 360px/1280px browser regression suite passed. These
-counts are automated synthetic tests, not production booking or email evidence.
+Evidence for this pass is recorded in `RELEASE_READINESS.md` with the tested PR
+head and CI results. All tests use synthetic data; they are not production
+booking or email evidence.
 
 Explicitly unverified: production HTTPS/certificates/DNS, hosting/cron behavior,
 actual mail recipient delivery, actual Twitch embed, venue/legal terms approval,

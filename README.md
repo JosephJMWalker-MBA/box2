@@ -10,6 +10,9 @@ This repository is the **canonical source for the new BOX2 site**, replacing an 
 - Read [docs/PRODUCT.md](docs/PRODUCT.md) for product, audience, program, stage culture, and consent requirements.
 - Read [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for data model, PHP/SQLite stack, rollout phases, and tests.
 - Read [docs/LAUNCH.md](docs/LAUNCH.md) before touching DNS, SSL, deployment, or publicity.
+- Read [docs/LEGACY_UI_RECONCILIATION.md](docs/LEGACY_UI_RECONCILIATION.md) and
+  [docs/ARRIVAL_PARKING_AND_OUTREACH.md](docs/ARRIVAL_PARKING_AND_OUTREACH.md)
+  for the nine-card flow, approved arrival window, and parking publication block.
 
 ## Product model
 
@@ -62,10 +65,14 @@ explicit loopback local mode but remain private.
 
 - Six recurring show nights with UTC slot identities, 22 public blocks, six
   host holds, two labelled private blocks, date exceptions, and guest hosts.
-- Atomic five-minute booking inside a ten-minute stage allocation; no two
-  bookings can occupy the same slot. Cancellation reopens capacity.
-- Server-rendered performer orientation enhanced to acknowledgment cards,
+- Atomic 5/10/15-minute sets reserve 1/2/3 adjacent ten-minute allocations.
+  Stage duration and calendar reservation are displayed separately. Cancellation
+  releases the entire reservation; occupied tail allocations cannot be changed.
+- Nine individually acknowledged performer orientation cards and three booking
+  steps, with a readable full-form fallback and preserved entered state,
   separate consent choices, exact show/stage dates and check-in times.
+- Arrive T−20 through T−10, check in immediately upon arrival, and be on deck
+  at T−10. Receipts, host views, orientation, and reminders share these times.
 - Password-based private host desk with CSRF, throttling, idle expiration,
   status/notes/tags, walk-in import, slot controls, and sanitation records.
 - Private original writer submissions, separate grants, credit preference,
@@ -82,6 +89,8 @@ explicit loopback local mode but remain private.
 
 ```sh
 php tests/run.php
+php tests/blocks.php
+php tests/migrations.php
 php tests/http.php
 php tests/ops.php
 find app public bin deploy tests -name '*.php' -exec php -l {} +
@@ -98,7 +107,9 @@ Playwright plus Chrome:
 BOX2_PLAYWRIGHT=/absolute/path/to/playwright node tests/browser.cjs
 ```
 
-CI targets PHP 8.2 and 8.5. See [the runbook](docs/RUNBOOK.md) for deployment,
+CI runs PHP/security/concurrency/upgrade suites and responsive Chromium tests
+against PHP 8.2 and 8.5. Browser test tooling is installed outside the production
+application. See [the runbook](docs/RUNBOOK.md) for deployment,
 backup/restore, cron, config, test evidence, and explicit limitations.
 
 ## Not verified on production

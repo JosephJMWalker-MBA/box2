@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.0 — Release-readiness reconciliation (no deployment)
+
+- Reconcile main's approved arrival and parking corrections into PR #1.
+- Restore nine explicit orientation cards, readable rules, established poster
+  styling, and three booking steps with preserved input during night changes.
+- Apply T−20 through T−10 arrival, immediate check-in, and T−10 on-deck target
+  consistently in orientation, receipts, reminders and host views.
+- Reserve 1/2/3 consecutive calendar allocations atomically for 5/10/15-minute
+  sets, prevent range overlap and occupied-tail edits, and release whole ranges.
+- Add safe migration and legacy outbox wording refresh without replay or false
+  updated consent. Preserve separate default-off recording and writer grants.
+- Extend PHP/HTTP/security/upgrade/concurrency/DST tests and run responsive
+  Chromium tests in PHP 8.2/8.5 CI. Keep launch permission gates disabled.
+
 ## 0.1.0 — Implementation for review
 
 - Plain PHP/SQLite MVP with six-night recurring schedule, zoned UTC slots,

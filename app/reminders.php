@@ -3,30 +3,72 @@ declare(strict_types=1);
 
 class MailAcceptanceUncertain extends RuntimeException {}
 
+function reminder_payload(array $booking, array $links, string $type): array
+{
+    $arrival = arrival_times($booking['start_at_utc']);
+    $intro = match ($type) {
+        'check_in_30' => 'Plan your arrival within the window below; check in upon arrival.',
+        'stage_10' => 'On-deck cue: be ready in the lobby/front desk area at the on-deck time below.',
+        'confirmation' => 'Your BOX2 booking is recorded.',
+        default => 'Your upcoming BOX2 set.'
+    };
+    $body = $intro . "\nBOX2 - Come Tell It Here First\nBooking code: {$booking['id']}\nShow evening: {$booking['show_date']}\n"
+        . 'Stage date/time block: ' . time_range($booking['start_at_utc'], $booking['stage_end_at_utc']) . "\n"
+        . "Set length: {$booking['duration_minutes']} stage minutes\n"
+        . 'Calendar reservation: ' . ($booking['block_count'] * 10) . ' minutes across ' . $booking['block_count'] . " adjacent allocations, including host/reset buffer.\n"
+        . 'Reserved until: ' . local_label($booking['reservation_end_at_utc']) . "\n"
+        . 'Arrival window: ' . arrival_window($booking['start_at_utc']) . "\nCheck in immediately upon arrival; do not arrive before the window opens.\n"
+        . 'On deck at: ' . local_label($arrival['on_deck_at_utc']) . "\nRecording permission: {$booking['consent_level']}\n"
+        . (config()['venue_public_enabled'] ? 'Venue: ' . config()['venue_address'] . "\nArrival: " . config()['arrival_text'] . "\n" : "Venue and parking instructions are awaiting onsite verification; no walk-in invitation.\n")
+        . (config()['venue_public_enabled'] ? 'Arrival updates: ' . url('/arrival') . "\n" : '')
+        . 'Orientation: ' . url('/rules') . "\nTwitch: https://www.twitch.tv/" . config()['twitch_channel'] . "\n"
+        . 'Confirm: ' . $links['confirm'] . "\nCancel: " . $links['cancel'] . "\n";
+    $label = match ($type) {'check_in_30' => 'arrival reminder', 'stage_10' => 'on-deck cue', default => str_replace('_', ' ', $type)};
+    return ['subject' => 'BOX2 ' . $label . ' - ' . local_label($booking['start_at_utc']),
+        'body' => $body, 'links' => $links, 'policy_version' => BOX2_TERMS];
+}
+
+function refresh_pending_reminder_payloads(): void
+{
+    $rows = query("SELECT * FROM reminders WHERE sent_at IS NULL AND status IN ('pending','failed','disabled')")->fetchAll();
+    foreach ($rows as $row) {
+        try {
+            $payload = json_decode($row['payload'], true, 512, JSON_THROW_ON_ERROR);
+            if (($payload['policy_version'] ?? '') === BOX2_TERMS) continue;
+            $links = $payload['links'] ?? [];
+            // One-time compatibility boundary for the v0.1 plain-text outbox; keep original tokens.
+            foreach (['confirm' => 'Confirm', 'cancel' => 'Cancel'] as $key => $label) {
+                if (!isset($links[$key]) && preg_match('/^' . $label . ': (.+)$/m', $payload['body'] ?? '', $match)) $links[$key] = trim($match[1]);
+                if (!is_string($links[$key] ?? null) || !filter_var($links[$key], FILTER_VALIDATE_URL)) throw new RuntimeException('Legacy reminder needs review.');
+            }
+            $updated = reminder_payload(booking_record($row['booking_id']), $links, $row['type']);
+            query("UPDATE reminders SET payload=? WHERE id=? AND sent_at IS NULL AND status IN ('pending','failed','disabled')",
+                [json_encode($updated, JSON_THROW_ON_ERROR), $row['id']]);
+        } catch (Throwable $exception) {
+            query("UPDATE reminders SET status='uncertain',error_message='Legacy payload requires host review; no replay scheduled.' WHERE id=? AND sent_at IS NULL AND status IN ('pending','failed','disabled')", [$row['id']]);
+        }
+    }
+}
+
 function schedule_reminders(string $id,array $links): void
 {
     $booking=booking_record($id);
     $stage=new DateTimeImmutable($booking['start_at_utc']);
-    $check=$stage->modify('-20 minutes');
+    $arrivalOpens=$stage->modify('-20 minutes');
     $day=local_instant($booking['show_date'],'14:00');
     $due=['confirmation'=>new DateTimeImmutable(), 'day_of'=>$day,'two_hours'=>$stage->modify('-2 hours'),
-        'check_in_30'=>$check->modify('-30 minutes'),'stage_10'=>$stage->modify('-10 minutes')];
-    $body="BOX2 - Come Tell It Here First\nBooking code: {$id}\nShow evening: {$booking['show_date']}\n"
-        .'Stage date/time: '.local_label($booking['start_at_utc'])."\nFive-minute set in a ten-minute allocation.\n"
-        .'Check in: '.local_label(utc($check))."\nRecording permission: {$booking['consent_level']}\n"
-        .(config()['venue_public_enabled']?'Venue: '.config()['venue_address']."\nArrival: ".config()['arrival_text']."\n":'Venue details are not yet approved for publication.'."\n")
-        .'Orientation: '.url('/rules')."\nTwitch: https://www.twitch.tv/".config()['twitch_channel']."\n"
-        .'Confirm: '.$links['confirm']."\nCancel: ".$links['cancel']."\n";
+        'check_in_30'=>$arrivalOpens->modify('-30 minutes'),'stage_10'=>$stage->modify('-10 minutes')];
     foreach ($due as $type=>$date) {
         if ($type!=='confirmation' && utc($date)<=utc()) continue;
         query('INSERT INTO reminders(booking_id,type,due_at_utc,status,payload) VALUES (?,?,?,?,?)',
             [$id,$type,utc($date),config()['mail_transport']==='disabled'?'disabled':'pending',
-             json_encode(['subject'=>'BOX2 '.$type.' - '.local_label($booking['start_at_utc']),'body'=>$body],JSON_THROW_ON_ERROR)]);
+             json_encode(reminder_payload($booking, $links, $type), JSON_THROW_ON_ERROR)]);
     }
 }
 
 function process_reminders(?callable $transport=null): array
 {
+    refresh_pending_reminder_payloads();
     $counts=['accepted'=>0,'failed'=>0,'disabled'=>0,'skipped'=>0,'uncertain'=>0];
     // A crashed worker may have sent the message. Do not blindly redeliver.
     $counts['uncertain']=query("UPDATE reminders SET status='uncertain',error_message='Interrupted send; manual provider verification required.'

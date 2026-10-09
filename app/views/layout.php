@@ -1,10 +1,11 @@
 <?php
 declare(strict_types=1);
-$titles=['/book'=>'Book a set','/rules'=>'Performer orientation','/arrive'=>'Arrive prepared',
+$titles=['/book'=>'Book a set','/rules'=>'Performer orientation','/arrive'=>'Arrive prepared','/arrival'=>'Arrive prepared',
     '/writers'=>'Writer submissions','/terms'=>'Terms + recording permissions','/privacy'=>'Privacy',
     '/admin'=>'Host desk','/admin/login'=>'Host sign in','/respond'=>'Your booking','/withdraw'=>'Writer permissions'];
 $title=$titles[$route]??$title;
 $canonical=url($route);
+if ($route==='/arrive') $canonical=url('/arrival');
 if ($route==='/book') {
     $sharedNight=false;
     if (isset($_GET['show']) && is_string($_GET['show']) && preg_match('/^\d{4}-\d{2}-\d{2}$/D',$_GET['show'])) {
@@ -14,7 +15,7 @@ if ($route==='/book') {
     }
     if ($sharedNight) {
         $canonical.='?show='.$sharedNight['show_date'];
-        $title='Show evening '.$sharedNight['show_date'].' · '.$sharedNight['status'];
+        $title='Show evening '.$sharedNight['show_date'].' · '.($sharedNight['status']==='closed'?'closed':(bookings_open()?'open':'schedule preview'));
     }
 }
 ?>
@@ -25,7 +26,7 @@ if ($route==='/book') {
     <meta name="theme-color" content="#f04d22"><title><?= e($title) ?> | BOX2</title>
     <meta name="description" content="Canton, Ohio comedy development stage. Everybody starts somewhere. Start here.">
     <link rel="canonical" href="<?= e($canonical) ?>">
-    <?php if (in_array($route,['/','/book','/rules','/arrive'],true)): ?>
+    <?php if (in_array($route,['/','/book','/rules','/arrive','/arrival'],true)): ?>
     <meta property="og:type" content="website"><meta property="og:title" content="BOX2 — <?= e($title) ?>">
     <meta property="og:description" content="Original comedy. Five minutes of work. Come tell it here first.">
     <meta property="og:url" content="<?= e($canonical) ?>"><meta property="og:image" content="<?= e(url('/assets/share.png')) ?>">
@@ -40,7 +41,7 @@ if ($route==='/book') {
     <a class="brand" href="<?= e(url()) ?>" aria-label="BOX2 home">BOX2<span>CANTON, OH</span></a>
     <nav aria-label="Main navigation">
         <a href="<?= e(url('/book')) ?>">Book</a><a href="<?= e(url('/rules')) ?>">Orientation</a>
-        <a href="<?= e(url('/arrive')) ?>">Arrival</a><a href="<?= e(url('/writers')) ?>">Writers</a>
+        <?php if (config()['venue_public_enabled']): ?><a href="<?= e(url('/arrival')) ?>">Arrival</a><?php endif; ?><a href="<?= e(url('/writers')) ?>">Writers</a>
     </nav>
 </header>
 <main id="main">
@@ -49,7 +50,7 @@ if ($route==='/book') {
 <?php
 $view=match($route) {
     '/'=>'home', '/book','/respond'=>'book', '/rules','/arrive'=>'orientation',
-    '/writers','/withdraw'=>'writers', '/admin','/admin/login'=>'admin', '/terms','/privacy'=>'policy', default=>'home'
+    '/arrival'=>'orientation', '/writers','/withdraw'=>'writers', '/admin','/admin/login'=>'admin', '/terms','/privacy'=>'policy', default=>'home'
 };
 try {require __DIR__.'/'.$view.'.php';}
 catch (Throwable $exception) {http_response_code(503);echo '<p class="message error">This page is unavailable until local setup is complete.</p>';error_log('BOX2 view error: '.get_class($exception));}

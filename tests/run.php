@@ -14,7 +14,7 @@ $checks=0;
 function check(bool $condition,string $label): void {global $checks;if (!$condition) throw new RuntimeException('FAIL: '.$label);$checks++;echo "PASS {$label}\n";}
 function denied(callable $work,string $label): void {try {$work();} catch (Throwable $e) {check(true,$label);return;}check(false,$label);}
 function payload(int $slot): array {return ['slot_id'=>$slot,'stage_name'=>'Synthetic Comic','email'=>'synthetic@example.test',
-    'performance_type'=>'standup','orientation_agreed'=>'1','terms_agreed'=>'1','livestream_allowed'=>'1','archive_allowed'=>'1','clips_allowed'=>'1'];}
+    'performance_type'=>'standup','orientation_agreed'=>'1','orientation_version'=>BOX2_TERMS,'terms_agreed'=>'1','livestream_allowed'=>'1','archive_allowed'=>'1','clips_allowed'=>'1'];}
 
 generate_schedule('2030-01-06',7);
 check((int)query('SELECT count(*) FROM show_nights')->fetchColumn()===6,'six nights, Tuesday excluded');
@@ -103,7 +103,7 @@ check($r['due_at_utc']==='2030-01-12T00:10:00Z','two-hour reminder UTC');
 $r=query("SELECT r.* FROM reminders r WHERE booking_id=? AND type='day_of'",[$l['id']])->fetch();
 check($r['due_at_utc']==='2030-01-11T19:00:00Z','day-of reminder uses show evening');
 $r=query("SELECT * FROM reminders WHERE booking_id=? AND type='check_in_30'",[$l['id']])->fetch();
-check($r['due_at_utc']==='2030-01-12T01:20:00Z','reminder is 30 minutes before check-in');
+check($r['due_at_utc']==='2030-01-12T01:20:00Z','reminder is 30 minutes before arrival window opens');
 $stats=process_reminders();check($stats['accepted']===0 && $stats['disabled']>0,'disabled transport never claims delivery');
 config(['mail_transport'=>'smtp']+config());
 $stats=process_reminders(fn()=>throw new RuntimeException('synthetic failure'));

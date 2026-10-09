@@ -17,7 +17,7 @@
     <a class="text-link" href="https://www.twitch.tv/<?= e(config()['twitch_channel']) ?>" rel="noopener" target="_blank">Watch on Twitch</a>
 </section>
 <section class="three-up">
-    <article class="panel"><p class="eyebrow">FIVE MINUTES OF WORK</p><h2>Original comedy.</h2><p>First attempt or touring set, you get focus. Stand-up, sketch, host practice, and portable-instrument musical comedy.</p></article>
+    <article class="panel"><p class="eyebrow">ROOM FOR REPS</p><h2>Original comedy.</h2><p>First attempt or touring set, you get focus. Choose 5, 10, or 15 stage minutes when adjacent allocations fit. Stand-up, sketches/characters, host practice, and portable-instrument musical comedy.</p></article>
     <article class="panel"><p class="eyebrow">SOBER + RESPECTFUL</p><h2>A room for reps.</h2><p>No competition, public ranking, or pressure to socialize. Respect the clock, volunteers, neighbors, and the performer on stage.</p></article>
     <article class="panel dark"><p class="eyebrow">YOUR MATERIAL STAYS YOURS</p><h2>Your set. Your choices.</h2><p>Choose broadcast, archive, clips, adaptation, and feedback separately. Private rehearsal means streaming and recording actually stopped.</p></article>
 </section>

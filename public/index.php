@@ -21,7 +21,9 @@ try {
         $night=filter_var($_GET['night']??null,FILTER_VALIDATE_INT);
         if (!$night) throw new InvalidArgumentException('Choose a show.');
         header('Content-Type: application/json');
-        echo json_encode(['slots'=>availability($night)],JSON_THROW_ON_ERROR);exit;
+        $show=query('SELECT id,show_date,status,override_note,guest_host FROM show_nights WHERE id=?',[$night])->fetch();
+        if (!$show) throw new InvalidArgumentException('Show not found.');
+        echo json_encode(['slots'=>availability($night),'night'=>$show,'bookings_enabled'=>bookings_open()],JSON_THROW_ON_ERROR);exit;
     }
     if (preg_match('#^/media/([a-f0-9]{32})$#D',$route,$match)) serve_arrival($match[1]);
     if (str_starts_with($route,'/admin') && $route!=='/admin/login' && !admin()) {
@@ -58,7 +60,7 @@ try {
                 $visibility=field($_POST,'visibility',10,true);
                 if (!in_array($visibility,['public','hold','private'],true)) throw new InvalidArgumentException('Invalid slot visibility.');
                 transaction(function () use ($slot,$visibility): void {
-                    if (query("SELECT 1 FROM bookings WHERE slot_id=? AND status!='cancelled'",[$slot])->fetchColumn()) throw new InvalidArgumentException('Cancel this booking before changing its slot.');
+                    if (query('SELECT 1 FROM booking_allocations WHERE slot_id=? AND active=1',[$slot])->fetchColumn()) throw new InvalidArgumentException('Cancel this booking before changing any of its reserved slots.');
                     query('UPDATE slots SET visibility=? WHERE id=?',[$visibility,$slot]);audit('slot_'.$visibility,(string)$slot);
                 });
             } elseif ($action==='sanitation') {
@@ -75,7 +77,7 @@ try {
             header('Location: '.url('/admin'.($night?'?night='.$night:'')));exit;
         } else throw new RuntimeException('Page not found.',404);
     }
-    if (!in_array($route,['/','/book','/rules','/arrive','/writers','/terms','/privacy','/respond','/withdraw','/admin','/admin/login'],true)) {
+    if (!in_array($route,['/','/book','/rules','/arrive','/arrival','/writers','/terms','/privacy','/respond','/withdraw','/admin','/admin/login'],true)) {
         throw new RuntimeException('Page not found.',404);
     }
 } catch (Throwable $exception) {

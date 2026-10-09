@@ -40,6 +40,7 @@ function migrate(): void
             query('INSERT INTO schema_migrations VALUES (?,?)', [$version, utc()]);
         });
     }
+    refresh_pending_reminder_payloads();
 }
 
 function transaction(callable $work): mixed

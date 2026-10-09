@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 const BOX2_FORMATS = ['standup' => 'Stand-up', 'musical_comedy' => 'Portable-instrument musical comedy',
-    'host_practice' => 'Host practice', 'sketch_comedy' => 'Sketch comedy'];
+    'host_practice' => 'Host practice', 'sketch_comedy' => 'Comedy sketches / characters'];
 const BOX2_TAGS = ['best_joke','good_premise','good_delivery','clip_this','invite_back','highlight','laundry'];
 
 function consent(array $data): array
@@ -23,6 +23,9 @@ function create_booking(array $data,bool $walkIn=false): array
     if (!flag($data,'orientation_agreed') || !flag($data,'terms_agreed')) {
         throw new InvalidArgumentException('Acknowledge performer orientation and the terms before booking.');
     }
+    if (field($data, 'orientation_version', 20) !== BOX2_TERMS) {
+        throw new InvalidArgumentException('Performer orientation has changed. Review the current nine cards before booking.');
+    }
     $stage = field($data,'stage_name',100,true);
     $full = field($data,'full_name',120);
     $email = email_field($data,'email');
@@ -34,25 +37,24 @@ function create_booking(array $data,bool $walkIn=false): array
     $permissions = consent($data);
     $slotId = filter_var($data['slot_id'] ?? null, FILTER_VALIDATE_INT);
     if (!$slotId || $slotId < 1) throw new InvalidArgumentException('Choose an available stage block.');
-    return transaction(function () use ($stage,$full,$email,$phone,$social,$format,$script,$permissions,$slotId,$walkIn): array {
-        $slot = query('SELECT s.*,n.status AS night_status,n.show_date FROM slots s JOIN show_nights n ON n.id=s.show_night_id WHERE s.id=?',[$slotId])->fetch();
-        if (!$slot || $slot['night_status'] !== 'open' || $slot['status'] !== 'open' || ($slot['visibility'] === 'hold' && !$walkIn)
-            || $slot['start_at_utc'] <= utc()) throw new InvalidArgumentException('This block is no longer available.');
-        if ($slot['visibility'] !== 'hold' && ($slot['visibility'] === 'private') !== ($permissions['level'] === 'private')) {
-            throw new InvalidArgumentException('Private rehearsals must use a labelled off-stream block; public blocks require livestream permission.');
-        }
-        if (query("SELECT 1 FROM bookings WHERE slot_id=? AND status!='cancelled'",[$slotId])->fetchColumn()) {
-            throw new InvalidArgumentException('This block was just booked. Choose another.');
-        }
+    $duration = filter_var($data['duration_minutes'] ?? 5, FILTER_VALIDATE_INT);
+    if (!in_array($duration, set_lengths(), true)) throw new InvalidArgumentException('Choose an available 5, 10, or 15-minute set length.');
+    $count = (int) ($duration / 5);
+    return transaction(function () use ($stage,$full,$email,$phone,$social,$format,$script,$permissions,$slotId,$walkIn,$duration,$count): array {
+        $blocks = reservable_blocks($slotId, $count, $permissions['level'] === 'private', $walkIn);
+        $slot = $blocks[0];
         $id = bin2hex(random_bytes(12));
-        if ($slot['visibility']==='hold') query('UPDATE slots SET visibility=? WHERE id=?',[$permissions['level']==='private'?'private':'public',$slotId]);
         query('INSERT INTO bookings(id,slot_id,stage_name,full_name,email,phone,social_handle,performance_type,
             consent_level,livestream_allowed,archive_allowed,clips_allowed,adaptation_allowed,feedback_allowed,
-            teleprompter_text,terms_version,consented_at,orientation_version,created_at,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            teleprompter_text,terms_version,consented_at,orientation_version,created_at,updated_at,duration_minutes,block_count)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
             [$id,$slotId,$stage,$full,$email,$phone,$social,$format,$permissions['level'],
              $permissions['livestream'],$permissions['archive'],$permissions['clips'],$permissions['adaptation'],$permissions['feedback'],
-             $script,BOX2_TERMS,utc(),BOX2_TERMS,utc(),utc()]);
+             $script,BOX2_TERMS,utc(),BOX2_TERMS,utc(),utc(),$duration,$count]);
+        foreach ($blocks as $block) {
+            if ($block['visibility'] === 'hold') query('UPDATE slots SET visibility=? WHERE id=?', [$permissions['level'] === 'private' ? 'private' : 'public', $block['id']]);
+            query('INSERT INTO booking_allocations(booking_id,slot_id) VALUES (?,?)', [$id, $block['id']]);
+        }
         $links = issue_booking_links($id,$slot['start_at_utc']);
         schedule_reminders($id,$links);
         if ($walkIn) audit('walk_in',$id);
@@ -60,11 +62,37 @@ function create_booking(array $data,bool $walkIn=false): array
     });
 }
 
+function reservable_blocks(int $slotId, int $count, bool $private, bool $walkIn): array
+{
+    $first = query('SELECT s.*,n.status AS night_status FROM slots s JOIN show_nights n ON n.id=s.show_night_id WHERE s.id=?', [$slotId])->fetch();
+    if (!$first || $first['night_status'] !== 'open') throw new InvalidArgumentException('This show is not available.');
+    $blocks = query('SELECT * FROM slots WHERE show_night_id=? AND start_at_utc>=? ORDER BY start_at_utc LIMIT ?',
+        [$first['show_night_id'], $first['start_at_utc'], $count])->fetchAll();
+    if (count($blocks) !== $count) throw new InvalidArgumentException('This set length does not fit before the show ends.');
+    foreach ($blocks as $index => $block) {
+        $expected = utc((new DateTimeImmutable($first['start_at_utc']))->modify('+' . ($index * 10) . ' minutes'));
+        if ($block['start_at_utc'] !== $expected || strtotime($block['end_at_utc']) - strtotime($block['start_at_utc']) !== 600
+            || $block['status'] !== 'open' || $block['start_at_utc'] <= utc()
+            || ($block['visibility'] === 'hold' && !$walkIn)) {
+            throw new InvalidArgumentException('This set length no longer fits consecutive open allocations.');
+        }
+        if ($block['visibility'] !== 'hold' && ($block['visibility'] === 'private') !== $private) {
+            throw new InvalidArgumentException('Private rehearsals must use off-stream blocks; a set cannot cross recording modes.');
+        }
+        if (query('SELECT 1 FROM booking_allocations WHERE slot_id=? AND active=1', [$block['id']])->fetchColumn()) {
+            throw new InvalidArgumentException('Part of this block was just booked. Choose another start time.');
+        }
+    }
+    return $blocks;
+}
+
 function booking_record(string $id): array
 {
-    $booking = query('SELECT b.*,s.start_at_utc,s.end_at_utc,s.show_night_id,n.show_date,n.recording_mode
+    $booking = query('SELECT b.*,s.start_at_utc,s.end_at_utc,s.show_night_id,n.show_date,n.recording_mode,
+        (SELECT max(allocated.end_at_utc) FROM booking_allocations a JOIN slots allocated ON allocated.id=a.slot_id WHERE a.booking_id=b.id) AS reservation_end_at_utc
         FROM bookings b JOIN slots s ON s.id=b.slot_id JOIN show_nights n ON n.id=s.show_night_id WHERE b.id=?',[$id])->fetch();
     if (!$booking) throw new InvalidArgumentException('Booking not found.');
+    $booking['stage_end_at_utc'] = utc((new DateTimeImmutable($booking['start_at_utc']))->modify('+' . $booking['duration_minutes'] . ' minutes'));
     return $booking;
 }
 
