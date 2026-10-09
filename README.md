@@ -8,6 +8,7 @@ This repository is the **canonical source for the new BOX2 site**, replacing an 
 
 - Read [AGENTS.md](AGENTS.md) for implementation invariants.
 - Read [docs/OPERATING_MODEL_AND_EXECUTION_PLAN.md](docs/OPERATING_MODEL_AND_EXECUTION_PLAN.md) for the complete business model, current PR inventory, gap analysis and release sequence.
+- Read [docs/LIVE_STUDIO_AND_GALAXY_SET.md](docs/LIVE_STUDIO_AND_GALAXY_SET.md) for the observed live OBS milestone, black-to-galaxy studio plan, privacy-safe broadcast operation and host readiness checklist.
 - Read [docs/PRODUCT.md](docs/PRODUCT.md) for product, audience, program, stage culture, and consent requirements.
 - Read [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for data model, PHP/SQLite stack, rollout phases, and tests.
 - Read [docs/LAUNCH.md](docs/LAUNCH.md) before touching DNS, SSL, deployment, or publicity.
@@ -31,7 +32,7 @@ Host/admin is authenticated, secure, and private. Bookings and writer submission
 - Twitch: https://www.twitch.tv/cantonrefinery
 - Venue address is held in the launch/operations plan; only publish after verifying premises, permissions, and safety.
 
-Current status: **specification handoff only**. Do not claim the replacement site is deployed, booking enabled, SSL repaired, reminders delivered, or media processing operational until verified.
+Current status: **Codex PHP/SQLite MVP exists in PR #1 and has passed local/CI checks, but is not verified deployed**. Owner demonstrated an active OBS stream of the evolving studio on 2026-10-09; Twitch playback, stream delay, actual private audio/video isolation and viewer-facing VOD are not yet independently verified. The legacy website remains visible; HTTPS browser trust displayed a warning despite a valid certificate. Do not claim the replacement site is deployed, bookings or venue entry enabled, HTTPS fully fixed, reminders delivered or clip publication operational until verified.
 
 ## Codex task
 
