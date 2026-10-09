@@ -2,6 +2,15 @@
 
 **Status: draft operational diagram specification — verify all ingress/egress, stalls and property rights onsite before website publication.** This document supersedes preliminary AI-generated parking graphics, which incorrectly swapped entry/exit and showed unsupported overflow parking. The annotated owner map supplied October 9, 2026 is the directional source of truth, subject to onsite validation.
 
+
+## Correction after owner review — October 9, 2026
+
+The owner rejected the earlier generated diagrams because they **did not match the physical aerial image or the owner's markings**. The inaccurate `docs/box2-arrival-draft.svg` was deleted. **Do not reuse it, regenerate the underlying satellite site plan, draw imaginary buildings, add fabricated parking stall lines, or promote an AI-reconstructed aerial to public directions.** The authoritative geometry is the exact, original user-supplied, unannotated Google Maps aerial screenshot together with the owner's edited markup, not the prior AI imagery or the deleted SVG.
+
+In the owner's markup: **BLUE is the intended vehicle route**, including **1 lower/south entrance and 2 upper/north exit**; **GREEN is only the paved parking immediately next to the long white building where the white car appears**; **RED is restricted/no parking/access space around the residence and cross-drive lanes**. The blue route must not pass through red marked areas, the neighboring home, or nonexistent roads. The owner's posted arrows should be traced accurately, not improvised. No Jerzee's overflow and no walkway/trail guidance.
+
+**Asset publication block:** no parking map is approved for deployment yet. A photographic overlay using the actual source pixels can be prepared as a review draft, but don't confuse it with a surveyed or owner-approved map. First obtain confirmation of each driveway, the route, specific green parking area, any no-parking strip, actual entrance, permitted hours, and fire/emergency clearance. Public page must wait for verification.
+
 ## Owner-annotated color key
 
 - **BLUE — vehicle traffic flow**, with directional arrows and **numbered access points**.
