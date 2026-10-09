@@ -58,6 +58,14 @@ requires neither Node nor a frontend build. The final verified commit and exact
 workflow results are recorded on [PR #1](https://github.com/JosephJMWalker-MBA/box2/pull/1).
 Screenshot artifacts are named `box2-responsive-php-8.2` / `box2-responsive-php-8.5`.
 
+The release implementation commit
+`0078293abf3ae1b0e039eb5a2b9efd648bdc903b` passed all four matrix jobs in
+[the PR workflow](https://github.com/JosephJMWalker-MBA/box2/actions/runs/37894443952)
+and [the branch-push workflow](https://github.com/JosephJMWalker-MBA/box2/actions/runs/37894440422):
+backend `verify` and responsive `browser`, each on PHP 8.2 and PHP 8.5.
+This documentation-only evidence update is checked again at the final PR head;
+the current verified head and workflow links are recorded in the PR description.
+
 ### Representative timing evidence (synthetic)
 
 - Friday show 2030-10-11, stage 23:50 EDT: a 15-minute set ends Saturday 00:05
