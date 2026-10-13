@@ -20,12 +20,13 @@ if ($result && isset($result['booking'])) {
 <?php if (isset($result['links'])): ?><p><a href="<?= e($result['links']['confirm']) ?>">Confirm</a> · <a href="<?= e($result['links']['cancel']) ?>">Cancel</a></p><?php endif; ?>
 </section>
 <?php return; } if ($route==='/respond') return;
-$nights=query('SELECT * FROM show_nights WHERE end_at_utc>? ORDER BY show_date LIMIT 28',[utc()])->fetchAll();
+$nights=query('SELECT id,show_date,status FROM show_nights WHERE end_at_utc>? ORDER BY show_date LIMIT 28',[utc()])->fetchAll();
 $sharedId=isset($_GET['show'])&&is_string($_GET['show'])?query('SELECT id FROM show_nights WHERE show_date=?',[$_GET['show']])->fetchColumn():false;
 $nightId=filter_var($_POST['night_id']??$_GET['night']??($sharedId?:($nights[0]['id']??null)),FILTER_VALIDATE_INT);
-$night=$nightId?query('SELECT * FROM show_nights WHERE id=?',[$nightId])->fetch():false;
-$slots=$night?availability((int)$night['id']):[];
+$night=$nightId?query('SELECT id,show_date,status FROM show_nights WHERE id=?',[$nightId])->fetch():false;
 $posted=is_string($_POST['csrf']??null)&&hash_equals(csrf(),$_POST['csrf'])?$_POST:[];
+$choice=($posted['capture_choice']??'')==='unrecorded'?'unrecorded':'public';
+$slots=$night?booking_options((int)$night['id'],$choice):[];
 $durations=[];
 foreach ($slots as $slot) $durations=array_merge($durations,$slot['durations']);
 $durations=array_values(array_unique($durations));sort($durations);
@@ -36,7 +37,7 @@ $value=fn(string $name): string => e(is_string($posted[$name]??null)?$posted[$na
 ?>
 <section class="page-heading"><p class="eyebrow">ORIGINAL COMEDY. ROOM TO WORK.</p><h1>Book your reps.</h1><p>5 / 10 / 15 stage minutes reserve 10 / 20 / 30 calendar minutes. Times are America/New_York; after-midnight sets belong to the previous evening's show.</p></section>
 <?php if (!bookings_open()): ?><p class="message">Reservations are not open yet. This schedule preview does not grant walk-in access.</p><?php endif; ?>
-<form method="get" id="night-picker-form" action="<?= e(url('/book')) ?>" data-slots-url="<?= e(url('/api/slots')) ?>"></form>
+<form method="get" id="night-picker-form" action="<?= e(url('/book')) ?>" data-slots-url="<?= e(url('/booking-options')) ?>"></form>
 <form method="post" action="<?= e(url('/book')) ?>" class="panel booking-form" id="booking-form">
 <input type="hidden" name="csrf" value="<?= e(csrf()) ?>"><input type="hidden" name="night_id" value="<?= (int)$nightId ?>">
 <input type="hidden" name="orientation_version" value="<?= e(BOX2_TERMS) ?>">
@@ -51,17 +52,19 @@ $value=fn(string $name): string => e(is_string($posted[$name]??null)?$posted[$na
 <p class="booking-progress" data-booking-progress role="status" hidden></p>
 <section data-booking-step="1"><p class="eyebrow">STEP 01</p><h2>Pick your night + set length</h2>
 <div class="night-picker"><label for="night">Show evening</label><select name="night" id="night" form="night-picker-form">
-<?php foreach ($nights as $item): ?><option value="<?= (int)$item['id'] ?>" <?= $nightId===$item['id']?'selected':'' ?>><?= e($item['show_date'].' · '.$item['status'].($item['override_note']?' · '.$item['override_note']:'')) ?></option><?php endforeach; ?>
+<?php foreach ($nights as $item): ?><option value="<?= (int)$item['id'] ?>" <?= $nightId===$item['id']?'selected':'' ?>><?= e($item['show_date'].' · '.$item['status']) ?></option><?php endforeach; ?>
 </select><button class="secondary" form="night-picker-form">See blocks</button></div>
-<p id="slot-status" role="status"><?= $night?e($night['override_note'].($night['guest_host']?' · Guest host: '.$night['guest_host']:'')):'' ?></p>
+<p id="slot-status" role="status"></p>
+<label for="capture-choice">Room broadcast choice</label><select id="capture-choice" name="capture_choice"><option value="public" <?= $choice==='public'?'selected':'' ?>>Choose a livestream-permitted stage time</option><option value="unrecorded" <?= $choice==='unrecorded'?'selected':'' ?>>Request rehearsal times with no room recording or broadcast</option></select>
+<noscript><p>Select a room broadcast choice and use this button to refresh times. Entered details remain in this form.</p><button class="secondary" name="refresh_options" value="1" formnovalidate>View rehearsal times</button></noscript>
 <fieldset <?= !bookings_open()?'disabled':'' ?>>
 <legend>Set length</legend><label for="set-length">Stage minutes</label><select name="duration_minutes" id="set-length" required>
 <?php foreach ($durations as $minutes): ?><option value="<?= $minutes ?>" <?= $minutes===$duration?'selected':'' ?>><?= $minutes ?> min set · <?= $minutes*2 ?> min reserved</option><?php endforeach; ?>
 </select><p class="fine-print">Each five minutes of stage time reserves one ten-minute allocation for host/reset buffer. All allocations must be consecutive, open, and in the same recording mode.</p>
 <div class="slot-grid" id="slot-grid">
-<?php foreach ($slots as $slot): ?><label class="slot <?= e($slot['state']) ?>" data-durations="<?= e(implode(',',$slot['durations'])) ?>" data-visibility="<?= e($slot['visibility']) ?>">
+<?php foreach ($slots as $slot): ?><label class="slot <?= e($slot['state']) ?>" data-durations="<?= e(implode(',',$slot['durations'])) ?>">
 <input type="radio" name="slot_id" value="<?= (int)$slot['id'] ?>" required <?= !in_array($duration,$slot['durations'],true)?'disabled':'' ?> <?= ($posted['slot_id']??'')===(string)$slot['id']&&in_array($duration,$slot['durations'],true)?'checked':'' ?>>
-<span><?= e($slot['label']) ?><small><?= e($slot['state']!=='available'?$slot['state']:($slot['visibility']==='private'?'Private · no recording':'Public · livestream permission required')) ?></small></span></label><?php endforeach; ?>
+<span><?= e($slot['label']) ?><small><?= $slot['state']==='available'?($choice==='unrecorded'?'No room recording or broadcast':'Livestream permission required'):'Unavailable' ?></small></span></label><?php endforeach; ?>
 </div><?php if (!$durations): ?><p>No consecutive open allocations fit a set on this show.</p><?php endif; ?>
 <button type="button" class="button" data-booking-next hidden>Continue with this block</button></fieldset></section>
 <section data-booking-step="2"><p class="eyebrow">STEP 02</p><h2>Who's going up?</h2>

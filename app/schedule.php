@@ -95,6 +95,19 @@ function availability(int $night): array
     return $slots;
 }
 
+function booking_options(int $night, string $choice='public'): array
+{
+    $slots=availability($night);
+    if ($choice==='unrecorded') {
+        $slots=array_values(array_filter($slots,static fn(array $s):bool=>$s['visibility']==='private' && $s['state']==='available'));
+    } elseif ($choice!=='public') throw new InvalidArgumentException('Choose a room broadcast preference.');
+    return array_map(static function (array $s) use ($choice):array {
+        $open=$s['state']==='available' && ($choice==='unrecorded' || $s['visibility']==='public');
+        return ['id'=>$s['id'],'start_at_utc'=>$s['start_at_utc'],'end_at_utc'=>$s['end_at_utc'],
+            'label'=>$s['label'],'state'=>$open?'available':'unavailable','durations'=>$open?$s['durations']:[]];
+    },$slots);
+}
+
 function set_lengths(): array
 {
     $lengths = config()['set_lengths'];

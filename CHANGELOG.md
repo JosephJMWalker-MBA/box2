@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0 — Issue #4 bounded P1 (not deployed)
+
+- Reconcile current owner operating/private broadcast/Top 5 canon; preserve P0.
+- Separate scoped channel, room transmission/storage and physical occupancy
+  assertions. Fresh complete checks required; fault/expiry/session changes fail
+  closed. Isolated house continuity stays disabled pending actual-device proof.
+- Keep nonpublic public inventory generic and hide guest/entry free-text hints.
+  Preserve normal unrecorded rehearsal booking through a CSRF-protected choice.
+- Add a private manual timecoded Top 5 ledger, specific performer/writer organic
+  destination/face/voice/credit releases, max-five selection and recorded URLs.
+- Preserve all baseline tests; add privacy, rights, migration, HTTP and browser
+  coverage. No OBS/social integration, renderer, real posting, ads or gate enabling.
+
 ## 0.2.0 — Release-readiness reconciliation (no deployment)
 
 - Reconcile main's approved arrival and parking corrections into PR #1.

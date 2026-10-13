@@ -152,15 +152,20 @@ function host_booking_action(string $id,string $action,string $note='',bool $noA
         } elseif (in_array($action,['checked_in','no_show','performed','cancelled'],true)) {
             if (in_array($booking['status'],['cancelled','performed'],true)) throw new InvalidArgumentException('This booking is already closed.');
             if ($action==='checked_in') {
-                $required=$booking['consent_level']==='private'?'confirmed_off':'public';
-                if ($booking['recording_mode']!==$required) {
-                    throw new InvalidArgumentException('Set the host recording mode first. Private rehearsal requires actual streaming AND recording stopped.');
+                $night=query('SELECT * FROM show_nights WHERE id=?',[$booking['show_night_id']])->fetch();
+                if ($booking['consent_level']==='private') {
+                    if (!private_capture_safe($night)) throw new InvalidArgumentException('Private room transmission and every room recorder must be verified OFF. On uncertainty STOP STREAMING; the website cannot control hardware.');
+                } elseif (!capture_assertions_valid($night) || $night['broadcast_source']!=='stage' || $night['room_transmission']!=='on'
+                    || query('SELECT 1 FROM show_nights WHERE private_room_occupied=1')->fetchColumn()) {
+                    throw new InvalidArgumentException('Reconfirm a safe stage source before public check-in.');
                 }
                 if ($booking['livestream_allowed'] && !$booking['archive_allowed'] && !$noArchiveConfirmed) {
                     throw new InvalidArgumentException('Confirm Twitch VOD and local recording are disabled for this live-only set before check-in.');
                 }
                 $other=query("SELECT b.id FROM bookings b JOIN slots s ON s.id=b.slot_id WHERE s.show_night_id=? AND b.status='checked_in' AND b.consent_level='private' AND b.id!=?",[$booking['show_night_id'],$id])->fetchColumn();
                 if ($other) throw new InvalidArgumentException('Finish the checked-in private rehearsal before another set enters.');
+                if ($booking['consent_level']==='private') query('UPDATE show_nights SET private_room_occupied=1 WHERE id=?',[$booking['show_night_id']]);
+                elseif (!$booking['archive_allowed']) query("UPDATE show_nights SET room_recording='off' WHERE id=?",[$booking['show_night_id']]);
             }
             query('UPDATE bookings SET status=?,check_in_at=CASE WHEN ?=\'checked_in\' THEN ? ELSE check_in_at END,
                 performed_at=CASE WHEN ?=\'performed\' THEN ? ELSE performed_at END,updated_at=? WHERE id=?',
@@ -180,17 +185,11 @@ function host_booking_action(string $id,string $action,string $note='',bool $noA
     });
 }
 
-function set_recording_mode(int $night,string $mode): void
+function set_recording_mode(int $night,string $mode,array $checks=[]): void
 {
     require_admin();
     if (!in_array($mode,['public','confirmed_off'],true)) throw new InvalidArgumentException('Invalid recording mode.');
-    transaction(function () use ($night,$mode): void {
-        if ($mode==='public' && query("SELECT 1 FROM bookings b JOIN slots s ON s.id=b.slot_id WHERE s.show_night_id=? AND b.status='checked_in' AND b.consent_level='private'",[$night])->fetchColumn()) {
-            throw new InvalidArgumentException('Finish or cancel the private rehearsal before resuming public broadcast.');
-        }
-        query('UPDATE show_nights SET recording_mode=?,recording_confirmed_at=? WHERE id=?',[$mode,utc(),$night]);
-        audit('recording_'.$mode,(string)$night);
-    });
+    set_capture_state($night,['source'=>$mode==='public'?'stage':'off']+$checks);
 }
 
 function submit_writer(array $data): array

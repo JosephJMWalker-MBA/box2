@@ -10,6 +10,9 @@ This repository is the **canonical source for the new BOX2 site**, replacing an 
 - Read [docs/OPERATING_MODEL_AND_EXECUTION_PLAN.md](docs/OPERATING_MODEL_AND_EXECUTION_PLAN.md) for the complete business model, current PR inventory, gap analysis and release sequence.
 - Read [docs/LIVE_STUDIO_AND_GALAXY_SET.md](docs/LIVE_STUDIO_AND_GALAXY_SET.md) for the observed live OBS milestone, black-to-galaxy studio plan, privacy-safe broadcast operation and host readiness checklist.
 - Read [docs/PRIVATE_REHEARSAL_BROADCAST_CONTINUITY.md](docs/PRIVATE_REHEARSAL_BROADCAST_CONTINUITY.md) for normal private performer bookings while the isolated Twitch house ads/sketches continue, including source-isolation tests and confidential guest protection.
+- Read [docs/WEEKLY_TOP_5.md](docs/WEEKLY_TOP_5.md) and
+  [docs/MANUAL_CAPTURE_AND_EDITORIAL.md](docs/MANUAL_CAPTURE_AND_EDITORIAL.md)
+  for clip-specific rights, the private manual ledger, and the actual-device checklist.
 - Read [docs/PRODUCT.md](docs/PRODUCT.md) for product, audience, program, stage culture, and consent requirements.
 - Read [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for data model, PHP/SQLite stack, rollout phases, and tests.
 - Read [docs/LAUNCH.md](docs/LAUNCH.md) before touching DNS, SSL, deployment, or publicity.
@@ -67,7 +70,8 @@ explicit loopback local mode but remain private.
 ## What is implemented
 
 - Six recurring show nights with UTC slot identities, 22 public blocks, six
-  host holds, two labelled private blocks, date exceptions, and guest hosts.
+  host holds, two private blocks, date exceptions, and host-only guest hosts.
+  Nonpublic inventory has a generic unavailable projection, not public labels.
 - Atomic 5/10/15-minute sets reserve 1/2/3 adjacent ten-minute allocations.
   Stage duration and calendar reservation are displayed separately. Cancellation
   releases the entire reservation; occupied tail allocations cannot be changed.
@@ -87,6 +91,14 @@ explicit loopback local mode but remain private.
   and original Open Graph artwork; no social APIs.
 - Durable reminder queue, bounded retries, SMTP STARTTLS or optional local
   mail adapter, and provider acceptance diagnostics. Defaults to disabled.
+- Scoped, expiring host assertions separate channel source from room transmission
+  and recording. Isolated house continuity is disabled until separately verified
+  and approved. No code operates OBS or camera/NVR/cloud devices.
+- Generic public unavailability for nonpublic inventory. The booking form can
+  request free unrecorded rehearsal times without exposing any occupied roster.
+- Private Top 5 ledger: actual-source reference/timecodes, separate one-use
+  performer/writer cross-platform releases, optional credit, at most five selected
+  moments, manual edit review, and recorded existing URLs. No rendering/posting API.
 
 ## Automated verification
 
@@ -96,6 +108,8 @@ php tests/blocks.php
 php tests/migrations.php
 php tests/http.php
 php tests/ops.php
+php tests/p1.php
+php tests/p1-upgrade.php
 find app public bin deploy tests -name '*.php' -exec php -l {} +
 node --check public/assets/site.js
 ```

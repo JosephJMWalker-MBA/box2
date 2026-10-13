@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require dirname(__DIR__).'/app/bootstrap.php';
+require __DIR__.'/capture-fixture.php';
 $directory=sys_get_temp_dir().'/box2-tests-'.bin2hex(random_bytes(6));
 mkdir($directory,0700,true);
 config(['storage_path'=>$directory,'secret'=>str_repeat('x',64),'environment'=>'local',
@@ -72,10 +73,10 @@ check(query('SELECT status FROM slots WHERE id=1')->fetchColumn()==='open','roll
 $private=payload((int)$slots[28]['id']);unset($private['livestream_allowed'],$private['archive_allowed'],$private['clips_allowed']);
 $p=create_booking($private)['booking'];
 denied(fn()=>host_booking_action($p['id'],'checked_in'),'private check-in blocked with unknown recording state');
-set_recording_mode($night,'confirmed_off');host_booking_action($p['id'],'checked_in');
+set_recording_mode($night,'confirmed_off',synthetic_off_checks());host_booking_action($p['id'],'checked_in');
 denied(fn()=>set_recording_mode($night,'public'),'public broadcast cannot resume during checked-in private set');
 denied(fn()=>host_booking_action($p['id'],'highlight'),'private set cannot be a highlight candidate');
-host_booking_action($p['id'],'performed');set_recording_mode($night,'public');
+host_booking_action($p['id'],'performed');clear_private_room($night,['guest_left'=>1,'capture_zone_clear'=>1]);set_recording_mode($night,'public',synthetic_stage_checks());
 $live=payload((int)$slots[1]['id']);unset($live['archive_allowed'],$live['clips_allowed']);
 $l=create_booking($live)['booking'];denied(fn()=>host_booking_action($l['id'],'clip_this'),'live-only set cannot be clipped');
 denied(fn()=>host_booking_action($l['id'],'checked_in'),'live-only set requires VOD/recording-off acknowledgment');

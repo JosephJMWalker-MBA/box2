@@ -1,8 +1,8 @@
 <?php
 declare(strict_types=1);
 
-const BOX2_VERSION = '0.2.0';
-const BOX2_TERMS = '2026-10-09';
+const BOX2_VERSION = '0.3.0';
+const BOX2_TERMS = '2026-10-13';
 const BOX2_ZONE = 'America/New_York';
 
 function config(?array $override = null): array
@@ -158,3 +158,5 @@ require_once __DIR__ . '/schedule.php';
 require_once __DIR__ . '/booking.php';
 require_once __DIR__ . '/reminders.php';
 require_once __DIR__ . '/media.php';
+require_once __DIR__ . '/capture.php';
+require_once __DIR__ . '/editorial.php';

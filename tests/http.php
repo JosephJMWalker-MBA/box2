@@ -88,7 +88,7 @@ try {
     http_check(str_contains($adminPage['body'],'15 minute set') && str_contains($adminPage['body'],'30 calendar minutes') && str_contains($adminPage['body'],'Check in immediately upon arrival'),'host lineup includes full long-set timing and approved arrival policy');
     http_check(request('/admin/action',['csrf'=>$adminToken,'action'=>'slot','slot_id'=>$slots[6]['id'],'night_id'=>$night,'visibility'=>'hold'])['code']===422,'host cannot change an occupied tail allocation');
     http_check(request('/admin/action',['csrf'=>'bad','action'=>'performed','booking_id'=>$database])['code']===422,'admin CSRF forgery rejected');
-    $state=request('/admin/action',['csrf'=>$adminToken,'action'=>'recording','night_id'=>$night,'mode'=>'public']);
+    $state=request('/admin/action',['csrf'=>$adminToken,'action'=>'recording','night_id'=>$night,'mode'=>'public','stage_zone_clear'=>1,'stage_content_permitted'=>1]);
     http_check($state['code']===302,'host records actual broadcast acknowledgment');
     http_check(request('/admin/action',['csrf'=>$adminToken,'action'=>'checked_in','booking_id'=>$database,'night_id'=>$night])['code']===422,'live-only check-in requires explicit VOD/recording acknowledgment');
     $checkin=request('/admin/action',['csrf'=>$adminToken,'action'=>'checked_in','booking_id'=>$database,'night_id'=>$night,'no_archive_confirmed'=>'1']);
@@ -125,5 +125,35 @@ try {
     }
     $closedData=$longData;$closedData['csrf']=form_csrf($closedPreview);
     http_check(request('/box2/book',$closedData)['code']===503,'closed launch gates deny even a valid-CSRF booking POST');
+    http_check(request('/box2/admin/editorial')['code']===302,'editorial desk requires authentication');
+    http_check(request('/box2/booking-options?night='.$night)['code']===403,'personal booking-options endpoint is not an anonymous GET API');
+    http_check(request('/box2/booking-options',['night'=>$night,'capture_choice'=>'unrecorded'])['code']===422,'requesting unrecorded times requires CSRF');
+    $privateName='PRIVATE_IDENTITY_P1_SENTINEL';$privateId=bin2hex(random_bytes(12));
+    query("UPDATE slots SET visibility='private' WHERE id IN (?,?,?)",[$slots[27]['id'],$slots[28]['id'],$slots[29]['id']]);
+    query("INSERT INTO bookings(id,slot_id,stage_name,email,performance_type,consent_level,livestream_allowed,archive_allowed,clips_allowed,terms_version,consented_at,orientation_version,created_at,updated_at,duration_minutes,block_count) VALUES (?,?,?,?,'standup','private',0,0,0,?,?,?,?,?,15,3)",[$privateId,$slots[27]['id'],$privateName,'private@example.test',BOX2_TERMS,utc(),BOX2_TERMS,utc(),utc()]);
+    foreach([27,28,29] as $i) query('INSERT INTO booking_allocations(booking_id,slot_id) VALUES (?,?)',[$privateId,$slots[$i]['id']]);
+    query('UPDATE show_nights SET guest_host=?,override_note=? WHERE id=?',[$privateName,'PRIVATE_ENTRY_LOCATION_P1_SENTINEL',$night]);
+    foreach(['/box2/','/box2/book?night='.$night,'/box2/api/slots?night='.$night,'/box2/rules','/box2/arrival'] as $publicPath) {
+        $public=request($publicPath)['body'];http_check(!str_contains($public,$privateName)&&!str_contains($public,$privateId)&&!str_contains($public,'PRIVATE_ENTRY_LOCATION_P1_SENTINEL'),'private identity/booking/entry hints withheld '.$publicPath);
+    }
+    $slotsResponse=json_decode(request('/box2/api/slots?night='.$night)['body'],true);
+    http_check($slotsResponse['slots'][27]['state']==='unavailable'&&!isset($slotsResponse['slots'][27]['visibility']),'anonymous private reservation looks generically unavailable');
+    $login=request('/box2/admin/login');$lt=form_csrf($login);
+    query('DELETE FROM rate_limits');request('/box2/admin/login',['csrf'=>$lt,'password'=>'synthetic-host-password']);
+    $editor=request('/box2/admin/editorial');$ec=form_csrf($editor);
+    $editorData=['csrf'=>$ec,'action'=>'create','booking_id'=>$database,'week_date'=>'2030-10-07','title'=>'PRIVATE_CANDIDATE_TITLE_P1','source_reference'=>'private-source-ref','source_duration'=>'00:05:00','in_time'=>'00:00:10','out_time'=>'00:00:20','origin'=>'performer_original','source_verified'=>1,'layers_cleared'=>1];
+    query("UPDATE bookings SET status='performed',consent_level='clip_eligible',archive_allowed=1,clips_allowed=1 WHERE id=?",[$database]);
+    http_check(request('/box2/admin/editorial',$editorData)['code']===302,'authorized host logs a timecoded candidate');
+    $candidateId=query('SELECT id FROM editorial_candidates ORDER BY created_at DESC LIMIT 1')->fetchColumn();
+    $createdLink=request('/box2/admin/editorial',['csrf'=>$ec,'action'=>'release_link','candidate_id'=>$candidateId,'role'=>'performer']);
+    preg_match('#href="([^"]+/release\?purpose=grant[^\"]+)"#',$createdLink['body'],$releaseMatch);$releaseUrl=html_entity_decode($releaseMatch[1],ENT_QUOTES);
+    $releasePath=substr($releaseUrl,strlen($base));$releasePage=request($releasePath);$releaseCsrf=form_csrf($releasePage);
+    http_check($releasePage['code']===200&&!preg_match('/name="(?:tiktok|instagram|facebook|youtube|face_voice|credit_allowed)"[^>]*checked/',$releasePage['body']),'clip-specific release is capability-scoped and default OFF');
+    parse_str(parse_url($releasePath,PHP_URL_QUERY),$releaseData);$releaseData+=['csrf'=>'forged','scope_acknowledged'=>1,'tiktok'=>1,'instagram'=>1,'facebook'=>1,'youtube'=>1,'face_voice'=>1];
+    http_check(request('/box2/release',$releaseData)['code']===422&&(int)query('SELECT count(*) FROM editorial_grants')->fetchColumn()===0,'CSRF grant spoofing creates no publication rights');
+    $releaseData['csrf']=$releaseCsrf;http_check(request('/box2/release',$releaseData)['code']===200,'owned candidate rights can be explicitly recorded');
+    http_check(request('/box2/release',$releaseData)['code']===422,'used release cannot be replayed over HTTP');
+    request('/box2/admin/logout',['csrf'=>$releaseCsrf]);
+    foreach(['/box2/','/box2/book?night='.$night,'/box2/api/slots?night='.$night] as $publicPath) http_check(!str_contains(request($publicPath)['body'],'PRIVATE_CANDIDATE_TITLE_P1'),'editorial source/title is absent publicly '.$publicPath);
     echo "{$checks} HTTP checks passed. Synthetic artifacts: {$directory}\n";
 } finally {proc_terminate($server);proc_close($server);}
