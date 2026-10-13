@@ -1,6 +1,6 @@
 # BOX2 — Launch, Deployment and Risk Gates
 
-**Status:** launch checklist. No certificate repair, PHP hosting verification, email provider setup, publicly advertised event, or venue compliance review has been completed by creating this repository.
+**Status:** launch checklist. Updated host/OBS observations (2026-10-09): DirectAdmin showed a valid automatically renewing wildcard certificate for `*.yurrmom.com`, and owner set the account-global PHP version to 8.5 with PDO SQLite enabled in the panel; the parent website reportedly loaded on mobile. These observations do **not** verify actual web-SAPI configuration or complete HTTPS browser trust: the BOX2 legacy site still showed Chrome **“Not Secure”** with a valid certificate. Owner also demonstrated an OBS session actively streaming a studio camera scene; it does **not** establish consent-safe audio/video isolation, Twitch VOD settings, stream delay, or public performer/venue readiness. No production deployment, real email delivery, publicly advertised event or venue compliance review has been completed merely by updating this repository. See [LIVE_STUDIO_AND_GALAXY_SET.md](LIVE_STUDIO_AND_GALAXY_SET.md).
 
 ## Separate technical rebuild from production repair
 
@@ -27,7 +27,7 @@ Cleaning: microphone/surface cleaning between sets; stage-left restroom and lobb
 - Final Terms of Service, Privacy Policy and performer release must be reviewed for applicable legal requirements and actual practices before launch; drafted policy alone does not secure consent.
 - Records of streamed performances can document when identifiable material was performed; they cannot conclusively establish original authorship or "first ever". A timestamp from ordinary DB writes alone is not independently tamper-evident proof.
 - Clarify VOD platform retention, optional clips, purpose/retention of event evidence, third-party copies, and writer submission licenses. Do not retain unapproved clips to issue proof; distinguish storage after VOD expiration from absence of retained evidence.
-- The host must actually stop Twitch/OBS/audio record for private rehearsals; no automated switch is assumed.
+- The host must actually disable and verify **all ROOM audio/video/recording** for private rehearsals, including independent Reolink camera storage (SD/NVR/cloud), and verify buffered/delayed output. The Twitch channel may continue playing **independent, prerecorded, rights-cleared house ads/sketches** only if no room capture can reach the public or be retained; when isolation is uncertain, **stop streaming and recording**. No automatic OBS switch is assumed. The public lineup and stream must not identify or signal private guests. See [PRIVATE_REHEARSAL_BROADCAST_CONTINUITY.md](PRIVATE_REHEARSAL_BROADCAST_CONTINUITY.md).
 - Keep stage names/public session info separate from legal name/contact data. No performer email, legal name, phone, private scripts or original writer material in share cards, advertising analytics, URLs, logs or public API.
 - Security include backups, file/SQLite exposure check, restore drill, patching/updates, anti-spam, admin lockouts, and incident contacts.
 
