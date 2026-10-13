@@ -15,7 +15,9 @@ live OBS/device operation, real performer mail, venue publication or ads occurre
 - Migration `003.sql` retains records and grants no old recording confirmation
   authority. New source/room states start unknown; old checked-in private occupancy
   remains held. Source assertions expire/tie to host session and code version.
-  Failure, fault, restart declaration and changed session block admission. House
+  Failure, fault, restart declaration and changed session block admission;
+  source/fault/room-clear changes invalidate proofs across all show dates because
+  they share one physical room. House
   continuity remains false by default; physical departure is separately asserted.
 - Private editorial source/timecode ledger with clip-specific performer/writer
   capabilities, separate default-off destination/face/voice/credit grants, approved
@@ -24,7 +26,7 @@ live OBS/device operation, real performer mail, venue publication or ads occurre
   recording, renderer, social API, uploader or automatic publishing is provided.
 - Existing baseline suites: 78 core, 64 adjacent-block and 65 migration checks;
   setup/backup/restore/retention drill retained. New capture/privacy/editorial suite:
-  64 checks. Expanded real loopback HTTP suite: 67 checks. Additional legacy-capture
+  67 checks. Expanded real loopback HTTP suite: 67 checks. Additional legacy-capture
   upgrade test verifies unknown/new states, occupied privacy and disabled gates.
 - Responsive browser checks at 360px/1280px preserve all prior keyboard/onboarding,
   duration, state-preserving night change and booking/login cases; add a normal

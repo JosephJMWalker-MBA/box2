@@ -38,7 +38,9 @@ Issues #2/#3 cover operational verification; this increment addresses Issue #4.
   interlude does not announce a guest. Never share the host/editor dashboard.
 - On uncertainty, source change, restart, interruption or device reconnect:
   stop the unsafe feed and mark fault/restart in the app. Reverify; no automatic
-  OBS restart detection or reconnect control is shipped.
+  OBS restart detection or reconnect control is shipped. All show dates share
+  the same room/devices; source/fault/room-clear changes invalidate older proofs
+  for every date. Do not reuse checks saved under another show evening.
 - Mark completion/cancellation separately from actual departure. Verify the guest
   is out of the full capture zone, clear occupancy, then recheck permitting stage
   content before restoring room sources. A completed DB booking does not prove

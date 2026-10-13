@@ -25,14 +25,21 @@ pcheck((int)query('SELECT count(*) FROM booking_allocations WHERE booking_id=? A
 $after=json_encode(booking_options($night));pcheck($before===$after,'public nonpublic inventory is unchanged by private booking');
 pcheck(!str_contains($after,'PRIVATE_GUEST_SENTINEL')&&!str_contains($after,'private')&&!str_contains($after,'visibility')&&!str_contains($after,'SCRIPT_SENTINEL'),'public projection has no private identity/classification/script');
 preject(fn()=>host_booking_action($private['booking']['id'],'checked_in'),'private check-in fails closed before source verification');
+set_recording_mode($night,'confirmed_off',synthetic_off_checks());
+$otherNight=schedule_night('2030-10-12');set_recording_mode($otherNight,'public',synthetic_stage_checks());
+preject(fn()=>host_booking_action($private['booking']['id'],'checked_in'),'changing the same room source on another show night invalidates old room-off assertions');
 preject(fn()=>set_capture_state($night,['source'=>'house']+synthetic_house_checks()),'house continuity is disabled by default');
 pcheck(!private_capture_safe(query('SELECT * FROM show_nights WHERE id=?',[$night])->fetch()),'failed source assertion invalidates earlier evidence');
 set_recording_mode($night,'public',synthetic_stage_checks());config(['allow_house_continuity'=>true]+config());
 set_capture_state($night,['source'=>'house']+synthetic_house_checks());host_booking_action($private['booking']['id'],'checked_in');
+preject(fn()=>set_recording_mode($otherNight,'public',synthetic_stage_checks()),'another date cannot restore room sources while a private guest is physically present');
+set_capture_state($night,['source'=>'house']+synthetic_house_checks());
 $state=query('SELECT * FROM show_nights WHERE id=?',[$night])->fetch();
 pcheck($state['broadcast_source']==='house'&&$state['room_transmission']==='off'&&$state['room_recording']==='off','channel house program is independent of private room transmission/storage');
 preject(fn()=>set_recording_mode($night,'public'),'stage sources cannot resume while private guest remains');
 set_capture_state($night,['source'=>'fault']);preject(fn()=>host_booking_action($private['booking']['id'],'checked_in'),'fault/restart invalidates verification instead of reconnecting sources');
+set_capture_state($night,['source'=>'house']+synthetic_house_checks());set_capture_state($otherNight,['source'=>'fault']);
+preject(fn()=>host_booking_action($private['booking']['id'],'checked_in'),'fault declared on another night invalidates the shared room proof');
 foreach(array_keys(ROOM_OFF_CHECKS+HOUSE_CHECKS) as $key) {
     $incomplete=synthetic_house_checks();unset($incomplete[$key]);
     preject(fn()=>set_capture_state($night,['source'=>'house']+$incomplete),'missing '.$key.' fails closed');

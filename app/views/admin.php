@@ -24,6 +24,7 @@ function host_hidden(?int $nightId=null): void {echo '<input type="hidden" name=
 <?php if($night): ?>
 <section class="panel"><p class="eyebrow">MANUAL SOURCE ASSERTIONS — NOT HARDWARE CONTROL</p><h2>Channel and room are separate.</h2>
 <p>Last asserted channel source: <?= e($night['broadcast_source']) ?> · Room transmission: <?= e($night['room_transmission']) ?> · Room recording: <?= e($night['room_recording']) ?>. Assertions expire after 30 minutes or a host-session change; this is not a stream-delay setting.</p>
+<p>Every date uses the same physical room. A source change, fault or room-clear assertion invalidates earlier checks for all dates.</p>
 <p>Operate OBS and every independent recorder manually first. On any uncertainty, STOP STREAMING and recording. House continuity <?= config()['allow_house_continuity']?'is enabled in this environment only':'remains disabled pending separately approved real-device/viewer verification' ?>.</p>
 <form method="post" action="<?= e(url('/admin/action')) ?>"><?php host_hidden((int)$nightId); ?><input type="hidden" name="action" value="capture">
 <label for="capture-source">Assert source after manual operation</label><select name="source" id="capture-source"><option value="off">Full OFF fallback</option><option value="house">Isolated prerecorded house media, room OFF</option><option value="stage">Consented stage source, room clear</option><option value="fault">Fault / restart / uncertainty — invalidate assertions</option></select>

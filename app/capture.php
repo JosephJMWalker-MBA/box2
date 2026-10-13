@@ -44,15 +44,22 @@ function private_capture_safe(array $night): bool
     return is_string($assertions['viewer_reference']??null) && trim($assertions['viewer_reference'])!=='';
 }
 
+function invalidate_capture_assertions(): void
+{
+    // Every show uses the same physical room and devices, not independent nightly sources.
+    query("UPDATE show_nights SET recording_mode='unknown',broadcast_source='unknown',room_transmission='unknown',room_recording='unknown',capture_verified_at=NULL,capture_session_hash='',capture_assertions='{}'");
+}
+
 function set_capture_state(int $nightId, array $data): void
 {
     require_admin();
-    $source=field($data,'source',10,true);
-    if (!in_array($source,['off','stage','house','fault'],true)) throw new InvalidArgumentException('Unknown source state.');
-    try {transaction(function () use ($nightId,$source,$data): void {
+    try {
+        $source=field($data,'source',10,true);
+        if (!in_array($source,['off','stage','house','fault'],true)) throw new InvalidArgumentException('Unknown source state.');
+        transaction(function () use ($nightId,$source,$data): void {
         if (!query('SELECT 1 FROM show_nights WHERE id=?',[$nightId])->fetchColumn()) throw new InvalidArgumentException('Show not found.');
         if ($source==='fault') {
-            query("UPDATE show_nights SET recording_mode='unknown',broadcast_source='unknown',room_transmission='unknown',room_recording='unknown',capture_verified_at=NULL,capture_session_hash='',capture_assertions='{}' WHERE id=?",[$nightId]);
+            invalidate_capture_assertions();
             audit('capture_fault_stop_required',(string)$nightId);return;
         }
         $assertions=[];
@@ -82,11 +89,13 @@ function set_capture_state(int $nightId, array $data): void
                 $assertions['viewer_reference']=field($data,'viewer_reference',300,true);
             }
         }
+        invalidate_capture_assertions();
         query('UPDATE show_nights SET recording_mode=?,recording_confirmed_at=?,broadcast_source=?,room_transmission=?,room_recording=?,capture_assertions=?,capture_session_hash=?,capture_verified_at=? WHERE id=?',
             [$source==='stage'?'public':'confirmed_off',utc(),$source,$source==='stage'?'on':'off',$source==='stage'?'allowed':'off',json_encode($assertions,JSON_THROW_ON_ERROR),capture_session_hash(),utc(),$nightId]);
         audit('capture_assertion_'.$source,(string)$nightId);
-    });} catch (InvalidArgumentException $exception) {
-        query("UPDATE show_nights SET recording_mode='unknown',broadcast_source='unknown',room_transmission='unknown',room_recording='unknown',capture_verified_at=NULL,capture_session_hash='',capture_assertions='{}' WHERE id=?",[$nightId]);
+        });
+    } catch (InvalidArgumentException $exception) {
+        invalidate_capture_assertions();
         throw $exception;
     }
 }
@@ -99,7 +108,8 @@ function clear_private_room(int $nightId,array $data): void
         if (query("SELECT 1 FROM bookings b JOIN slots s ON s.id=b.slot_id WHERE s.show_night_id=? AND b.status='checked_in' AND b.consent_level='private'",[$nightId])->fetchColumn()) {
             throw new InvalidArgumentException('Finish or cancel the checked-in set, then verify the guest has actually left.');
         }
-        query("UPDATE show_nights SET private_room_occupied=0,recording_mode='unknown',broadcast_source='unknown',room_transmission='unknown',room_recording='unknown',capture_verified_at=NULL,capture_session_hash='',capture_assertions='{}' WHERE id=?",[$nightId]);
+        query('UPDATE show_nights SET private_room_occupied=0 WHERE id=?',[$nightId]);
+        invalidate_capture_assertions();
         audit('private_room_cleared_reverify',(string)$nightId);
     });
 }

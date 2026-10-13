@@ -179,7 +179,10 @@ the whole channel. Complete the manual checklist in
 Source assertions are tied to the current host session and code version and expire
 after 30 minutes (a freshness limit, NOT a stream delay). Missing checks invalidate
 old assertions. Fault/restart/uncertainty controls reset state to unknown; the app
-cannot detect an external OBS restart. Operators must use that control and STOP
+cannot detect an external OBS restart. Every date shares one physical room:
+source changes, faults, failed source checks and room-clear assertions invalidate
+old proofs across all show dates, not only the selected night.
+Operators must use that control and STOP
 STREAMING on uncertainty. Private check-in sets occupied state; performed/cancelled
 does not certify guest departure. Explicitly clear the capture zone after guest
 departure, then recheck before restoring consenting stage sources. All private
