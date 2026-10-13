@@ -36,8 +36,8 @@ function host_hidden(?int $nightId=null): void {echo '<input type="hidden" name=
 <details class="panel"><summary>Show exception / guest host / adjusted hours</summary>
 <form method="post" action="<?= e(url('/admin/action')) ?>"><?php host_hidden((int)$nightId); ?><input type="hidden" name="action" value="override">
 <div class="field-grid"><label>Status<select name="status"><option <?= $night['status']==='open'?'selected':'' ?>>open</option><option <?= $night['status']==='closed'?'selected':'' ?>>closed</option></select></label>
-<label>Public exception note<input name="override_note" maxlength="300" value="<?= e($night['override_note']) ?>"></label>
-<label>Guest host<input name="guest_host" maxlength="100" value="<?= e($night['guest_host']) ?>"></label>
+<label>Private schedule exception note (not published)<input name="override_note" maxlength="300" value="<?= e($night['override_note']) ?>"></label>
+<label>Guest host (host-only)<input name="guest_host" maxlength="100" value="<?= e($night['guest_host']) ?>"></label>
 <label>Local start<input type="time" name="start" step="600" value="<?= e((new DateTimeImmutable($night['start_at_utc']))->setTimezone(new DateTimeZone(BOX2_ZONE))->format('H:i')) ?>" required></label>
 <label>Local end<input type="time" name="end" step="600" value="<?= e((new DateTimeImmutable($night['end_at_utc']))->setTimezone(new DateTimeZone(BOX2_ZONE))->format('H:i')) ?>" required></label></div>
 <p>Occupied slots cannot move. Cancel affected bookings first. New adjusted-hour blocks start held; deliberately open them below.</p><button class="button">Save exception</button></form></details>
