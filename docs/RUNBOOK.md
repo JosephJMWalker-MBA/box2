@@ -1,11 +1,13 @@
 # BOX2 MVP Runbook
 
-Version 0.2.0. Implementation/test evidence only; no production deployment,
+Version 0.3.0. Implementation/test evidence only; no production deployment,
 certificate repair, mail delivery, public venue access, or Twitch playback claim.
 `PRODUCT.md`, `IMPLEMENTATION.md`, `LAUNCH.md`, and `AGENTS.md` remain canonical.
 `LEGACY_UI_RECONCILIATION.md` and `ARRIVAL_PARKING_AND_OUTREACH.md` supersede
 legacy visual references and parking/arrival instructions. Main through
 `adc1f3a` was reconciled into the PR branch without replacing the implementation.
+The P1 successor also includes main through `e3db34f` and the integrated operating,
+private broadcast continuity, live-studio and weekly Top 5 specifications.
 
 ## Local and staging setup
 
@@ -46,6 +48,9 @@ Configure values after host verification; do not publish secret values:
   parking, walk, entry, access, and restroom instructions; no invented permissions.
 - `allow_bookings`: enable only after infrastructure, consent/terms, venue,
   cancellation, persistence, mail unavailable/delivery behavior, and host checks.
+- `allow_house_continuity=false`: keep full channel OFF fallback until actual
+  room/device/second-viewer isolation is verified and separately approved. This
+  gate is independent of bookings and venue publication, which remain false.
 - `set_lengths`: configurable subset of `[5,10,15]` stage minutes, requiring
   respectively 1/2/3 adjacent ten-minute calendar allocations. UI choices derive
   from real contiguous capacity; the server rechecks every allocation atomically.
@@ -124,7 +129,7 @@ clip or archive permission beyond the explicitly selected livestream grant.
 
 The nine shared `/rules` cards drive progressive onboarding. No browser storage
 remembers an old acceptance; new bookings must report the current orientation
-version (`2026-10-09`). Back/forward navigation and schedule fetches preserve
+version (`2026-10-13`). Back/forward navigation and schedule fetches preserve
 entered performer data and explicit grants in the current form. Without JS,
 all nine cards and the full form remain readable and server validation still
 checks capacity and consent. Dynamic start filtering uses JS; without it the
@@ -160,19 +165,75 @@ performers. Cancellation stops future reminders but does not currently send a
 separate cancellation email; host notification is an explicit operational step.
 Occupied slots cannot change time/visibility. Adjusted hours retain old slot IDs;
 out-of-range slots close and new slots start held. Deliberately open them in the
-host desk. Guest hosts and public exception notes appear to bookers.
+host desk. Guest host and free-text exception notes now stay host-only; public
+bookers see the declared show status and generic available/unavailable choices.
 
-For private rehearsal, actually stop Twitch/OBS, all VOD/local recording, and
-other recording devices, then acknowledge `confirmed_off`. App check-in blocks
-private sets until this acknowledgment. It cannot switch external equipment.
-Finish/cancel the checked-in private rehearsal before recording public mode can
-resume. Live-only check-in requires a separate per-set confirmation of disabled
-Twitch VOD/local recording. Verify archive and clip grants before any publication.
+For an unrecorded rehearsal, all ROOM transmission/storage must actually be off,
+including independent Reolink SD/NVR/cloud/event capture, audio/desktop sources,
+local record/replay and buffered output. In-room mic amplification is separate.
+Only a pre-reviewed isolated prerecorded house source may continue on Twitch
+after outside-viewer proof and separate configuration approval. Otherwise stop
+the whole channel. Complete the manual checklist in
+`MANUAL_CAPTURE_AND_EDITORIAL.md`; no software control or certification is implied.
 
-Clip/Laundry tags are editorial candidates only. No publishing endpoint exists.
+Source assertions are tied to the current host session and code version and expire
+after 30 minutes (a freshness limit, NOT a stream delay). Missing checks invalidate
+old assertions. Fault/restart/uncertainty controls reset state to unknown; the app
+cannot detect an external OBS restart. Operators must use that control and STOP
+STREAMING on uncertainty. Private check-in sets occupied state; performed/cancelled
+does not certify guest departure. Explicitly clear the capture zone after guest
+departure, then recheck before restoring consenting stage sources. All private
+occupancy across show nights blocks stage-source restoration. Logout/new login
+requires fresh assertions. Live-only still needs explicit disabled room VOD/local
+recording confirmation. Actual delay remains unspecified.
+
+Migration `003.sql` retains the old `recording_mode` as compatibility/history;
+new source/room fields default unknown and do not inherit old verification. An
+old checked-in private set remains occupied. Never treat `confirmed_off` alone as
+hardware proof. The operator helper now requires the actual room-off checklist.
+
+Clip/Laundry tags are editorial candidates only. No external publishing endpoint exists.
 Writer performance/publication/AI/music grants are independent; a host marking
 production begun must verify the relevant grants manually. No public writer feed
 or social automation exists. Keep host pages off projectors and streams.
+
+### Private booking projection and Top 5 ledger
+
+Anonymous `/api/slots` and book-page inventory show available public blocks or
+generic unavailable blocks only; no private/held classifications, guest host or
+free-text notes, identity, booking ref, arrival plan or room state is exported.
+The normal booking form can request free unrecorded times with CSRF-protected
+POST `/booking-options`; it returns available choices only, never occupied
+private inventory or its reason. This is not a public account or VIP tier.
+Owner-created receipt/action links remain private capabilities. This does not
+promise absolute secrecy from outside observers or inference about free capacity.
+
+`/admin/editorial` is the private ledger. Log performed recording/clip-authorized
+material, an actual source reference (no upload/read/fetch), duration/timecodes,
+origin and layer-rights attestations. Candidate tags do not grant release. The host
+privately routes one-use, hashed/signed clip-specific performer and applicable
+writer links (7-day expiry); no new mail is automatically sent. Releases bind one
+candidate, role, week and version; defaults are off for all four organic
+destinations, face/voice and public credit. No fallback from legal/stage names.
+Do not expand generic old clips, writer publication or feedback grants.
+
+Every selected moment needs current performer face/voice and all four destination
+grants, actual source/layer review, and writer performance/publication PLUS
+specific writer destination grants if derived. Unclear or unsupported external/
+multiple-writer rights remain ineligible. Review, order positions 1–5, manually
+edit one vertical master, handle preview/objections, then record actual HTTPS URLs
+on TikTok/Instagram/Facebook/YouTube. The app never renders, uploads, posts, scrapes,
+boosts ads, or verifies a remote post. URLs are human records, not delivery proof.
+Fewer than five or no episode is valid. Rights are rechecked on selection/edit/URL
+recording. Rejection/unselection/grant changes invalidate unposted edit references.
+Posted history is frozen; withdrawal flags manual removal, not third-party erasure.
+
+Release withdrawal capabilities expire after 30 days; later requests go through
+the host. Keep authorization URLs private and redact query tokens from hosting
+access logs. Editorial-linked rights/history is retained for manual audit under
+the approved retention policy; resolved contact/scripts are scrubbed at the usual
+retention interval. Unlinked records continue to expire normally. Review/archive
+old rights records, media and backups manually; no automatic footage cleanup exists.
 
 Uploads accept MP4/WebM <=25 MB inspected with fileinfo. Set host PHP
 `upload_max_filesize=25M`, `post_max_size=28M` (or suitable bounds). Transcript is
