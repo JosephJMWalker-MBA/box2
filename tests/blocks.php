@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 require dirname(__DIR__).'/app/bootstrap.php';
+require __DIR__.'/capture-fixture.php';
 $directory=sys_get_temp_dir().'/box2-blocks-'.bin2hex(random_bytes(6));mkdir($directory,0700,true);
 config(['storage_path'=>$directory,'secret'=>str_repeat('b',64),'environment'=>'local','allow_bookings'=>true,'venue_public_enabled'=>true]);
 $_SERVER['REMOTE_ADDR']='127.0.0.1';$_SESSION=['admin'=>true,'last_active'=>time()];migrate();
@@ -64,7 +65,7 @@ cancel_block($late);
 $private=create_booking(block_payload($slots[28]['id'],10,true));
 foreach(['livestream','archive','clips','adaptation','feedback'] as $grant) blocks_check($private['booking'][$grant.'_allowed']===0,'private '.$grant.' grant remains default off');
 blocks_reject(fn()=>host_booking_action($private['booking']['id'],'checked_in'),'multi-block private rehearsal still requires actual stream-stop acknowledgment');
-set_recording_mode($night,'confirmed_off');host_booking_action($private['booking']['id'],'checked_in');
+set_recording_mode($night,'confirmed_off',synthetic_off_checks());host_booking_action($private['booking']['id'],'checked_in');
 blocks_reject(fn()=>set_recording_mode($night,'public'),'private multi-block check-in still blocks broadcast resumption');
 host_booking_action($private['booking']['id'],'cancelled');
 blocks_check(availability($night)[28]['state']==='available' && availability($night)[29]['state']==='available','host cancellation releases both private allocations');

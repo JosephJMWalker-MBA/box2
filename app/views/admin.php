@@ -18,13 +18,21 @@ function host_hidden(?int $nightId=null): void {echo '<input type="hidden" name=
 <section class="page-heading host-heading"><div><p class="eyebrow">PRIVATE — NEVER PROJECT THIS PAGE</p><h1>Host desk.</h1></div>
 <form method="post" action="<?= e(url('/admin/logout')) ?>"><?php host_hidden(); ?><button class="secondary">Log out</button></form></section>
 <?php if($flash): ?><p class="message" role="status"><?= e($flash) ?></p><?php endif; ?>
+<p><a href="<?= e(url('/admin/editorial')) ?>">Private weekly Top 5 ledger</a></p>
 <form method="get" class="night-picker"><label for="night">Show night</label><select id="night" name="night">
 <?php foreach($nights as $item): ?><option value="<?= (int)$item['id'] ?>" <?= $nightId===$item['id']?'selected':'' ?>><?= e($item['show_date'].' · '.$item['status']) ?></option><?php endforeach; ?></select><button class="secondary">View night</button></form>
 <?php if($night): ?>
-<section class="panel"><p class="eyebrow">ACTUAL RECORDING STATE</p><h2><?= e($night['recording_mode']) ?></h2>
-<p>These controls record your acknowledgment. They cannot operate OBS, Twitch, VOD settings, or recording hardware. Actually stop them before private rehearsal. Live-only sets require VOD and local recording disabled.</p>
-<form method="post" action="<?= e(url('/admin/action')) ?>" class="inline-form"><?php host_hidden((int)$nightId); ?><input type="hidden" name="action" value="recording">
-<button class="secondary" name="mode" value="confirmed_off">I stopped streaming AND all recording</button><button class="secondary" name="mode" value="public">I resumed public broadcast</button></form></section>
+<section class="panel"><p class="eyebrow">MANUAL SOURCE ASSERTIONS — NOT HARDWARE CONTROL</p><h2>Channel and room are separate.</h2>
+<p>Last asserted channel source: <?= e($night['broadcast_source']) ?> · Room transmission: <?= e($night['room_transmission']) ?> · Room recording: <?= e($night['room_recording']) ?>. Assertions expire after 30 minutes or a host-session change; this is not a stream-delay setting.</p>
+<p>Operate OBS and every independent recorder manually first. On any uncertainty, STOP STREAMING and recording. House continuity <?= config()['allow_house_continuity']?'is enabled in this environment only':'remains disabled pending separately approved real-device/viewer verification' ?>.</p>
+<form method="post" action="<?= e(url('/admin/action')) ?>"><?php host_hidden((int)$nightId); ?><input type="hidden" name="action" value="capture">
+<label for="capture-source">Assert source after manual operation</label><select name="source" id="capture-source"><option value="off">Full OFF fallback</option><option value="house">Isolated prerecorded house media, room OFF</option><option value="stage">Consented stage source, room clear</option><option value="fault">Fault / restart / uncertainty — invalidate assertions</option></select>
+<fieldset><legend>All room-off checks (required for OFF/house)</legend><?php foreach(ROOM_OFF_CHECKS as $key=>$label): ?><label class="check"><input name="<?= e($key) ?>" type="checkbox" value="1"><?= e($label) ?></label><?php endforeach; ?>
+<label class="check"><input name="channel_stopped" type="checkbox" value="1">For OFF fallback: channel streaming and local/replay recording are stopped.</label>
+<?php foreach(HOUSE_CHECKS as $key=>$label): ?><label class="check"><input name="<?= e($key) ?>" type="checkbox" value="1"><?= e($label) ?></label><?php endforeach; ?>
+<?php foreach(STAGE_CHECKS as $key=>$label): ?><label class="check"><input name="<?= e($key) ?>" type="checkbox" value="1">For stage restoration: <?= e($label) ?></label><?php endforeach; ?>
+<label>Private independent-viewer test reference (house only)<input name="viewer_reference" maxlength="300"></label></fieldset><button class="button">Record human assertions</button></form>
+<form method="post" action="<?= e(url('/admin/action')) ?>"><?php host_hidden((int)$nightId); ?><input type="hidden" name="action" value="room_clear"><label class="check"><input name="guest_left" type="checkbox" value="1" required>The private guest has actually departed.</label><label class="check"><input name="capture_zone_clear" type="checkbox" value="1" required>The full capture zone is clear; do not restore devices until rechecked for the next consenting act.</label><button class="secondary">Clear occupancy and invalidate old assertions</button></form></section>
 <details class="panel"><summary>Show exception / guest host / adjusted hours</summary>
 <form method="post" action="<?= e(url('/admin/action')) ?>"><?php host_hidden((int)$nightId); ?><input type="hidden" name="action" value="override">
 <div class="field-grid"><label>Status<select name="status"><option <?= $night['status']==='open'?'selected':'' ?>>open</option><option <?= $night['status']==='closed'?'selected':'' ?>>closed</option></select></label>

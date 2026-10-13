@@ -2,7 +2,7 @@
 declare(strict_types=1);
 $titles=['/book'=>'Book a set','/rules'=>'Performer orientation','/arrive'=>'Arrive prepared','/arrival'=>'Arrive prepared',
     '/writers'=>'Writer submissions','/terms'=>'Terms + recording permissions','/privacy'=>'Privacy',
-    '/admin'=>'Host desk','/admin/login'=>'Host sign in','/respond'=>'Your booking','/withdraw'=>'Writer permissions'];
+    '/admin'=>'Host desk','/admin/login'=>'Host sign in','/admin/editorial'=>'Private Top 5 desk','/release'=>'Compilation permissions','/respond'=>'Your booking','/withdraw'=>'Writer permissions'];
 $title=$titles[$route]??$title;
 $canonical=url($route);
 if ($route==='/arrive') $canonical=url('/arrival');
@@ -50,7 +50,7 @@ if ($route==='/book') {
 <?php
 $view=match($route) {
     '/'=>'home', '/book','/respond'=>'book', '/rules','/arrive'=>'orientation',
-    '/arrival'=>'orientation', '/writers','/withdraw'=>'writers', '/admin','/admin/login'=>'admin', '/terms','/privacy'=>'policy', default=>'home'
+    '/arrival'=>'orientation', '/release'=>'release', '/admin/editorial'=>'editorial', '/writers','/withdraw'=>'writers', '/admin','/admin/login'=>'admin', '/terms','/privacy'=>'policy', default=>'home'
 };
 try {require __DIR__.'/'.$view.'.php';}
 catch (Throwable $exception) {http_response_code(503);echo '<p class="message error">This page is unavailable until local setup is complete.</p>';error_log('BOX2 view error: '.get_class($exception));}

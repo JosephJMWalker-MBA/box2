@@ -17,7 +17,7 @@
 <p>Wait in the lobby until called. Only the performer currently on deck enters the immediate staging area; the next performer rotates in as the previous performer rotates out. Keep movement clear and considerate.</p></article>
 
 <article class="orientation-card"><p class="eyebrow">05 · PERFORMANCE ENVIRONMENT</p><h2>Bring focus back to the joke.</h2>
-<p>This is a workspace being improved. Equipment, maintenance activity, dogs, and outside or rail noise may be present. Distractions are a chance to practice recovering your focus.</p>
+<p>This is a workspace being improved. Equipment, maintenance activity, and outside or rail noise may be present. The owner reports animals are excluded from the stage room; that does not certify safe premises. Distractions are a chance to practice recovering your focus.</p>
 <p>Noise is not permission for unsafe conditions. Tell the host about hazards; staff must address them or stop access. Acknowledging this card does not make construction hazards acceptable.</p></article>
 
 <article class="orientation-card"><p class="eyebrow">06 · HEALTH + FACILITY</p><h2>Cleaning is an operating duty.</h2>
@@ -29,9 +29,9 @@
 <p>Respect the clock, the next performer, volunteers, and neighbors. No attacking a prior comic to steal laughs, talking in back, disruptive phone use, or unauthorized filming. This room belongs to the act on stage.</p></article>
 
 <article class="orientation-card"><p class="eyebrow">08 · AUDIENCE + RECORDING</p><h2>Your set. Your choices.</h2>
-<p>Spectating is welcome and optional. There is no obligation to linger or socialize; leaving promptly makes room for the next performer. Focus on stage time. Socialize online.</p>
+<p>Attentively supporting another scheduled act is welcome and optional. BOX2 is not a hangout: no idle parking, lobby loitering or outside congregation. Adjacent individual bookings and complementary sets are encouraged, not required; solo newcomers have equal access. Focus on stage time. Socialize online.</p>
 <p>Choose livestream, archive, approved host clips, adaptation, and moderated feedback separately; all begin off. Approved candidates may be considered for clips, never automatically or with a guarantee.</p>
-<p>BOX2 archive retention is <?= (int)config()['vod_retention_days'] ?> days under the stated policy. Live-only means the host disables Twitch VOD and local recording. Private rehearsal requires streaming and all recording actually stopped. The website cannot control OBS or cameras; independent viewer copies may persist.</p></article>
+<p>BOX2 archive retention is <?= (int)config()['vod_retention_days'] ?> days under the stated policy. Live-only means the host disables room VOD/local recording. For an unrecorded rehearsal, every room camera, microphone and independent SD/NVR/cloud recorder must be off. Separately verified prerecorded house programming may continue on Twitch; it must never capture the room. On uncertainty the host stops streaming and recording. The website cannot control OBS/devices; stream delay is not privacy and has no asserted duration.</p></article>
 
 <article class="orientation-card"><p class="eyebrow">09 · THE BOX2 MINDSET</p><h2>Leave your best set on stage.</h2>
 <p>BOX2 is where rough material gets sharpened. A dog may bark, a train may pass, or someone may cough. Return attention to the joke. Leave your ego at the door, then go build the next one.</p>

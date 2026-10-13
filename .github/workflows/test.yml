@@ -19,6 +19,8 @@ jobs:
       - run: php tests/migrations.php
       - run: php tests/http.php
       - run: php tests/ops.php
+      - run: php tests/p1.php
+      - run: php tests/p1-upgrade.php
       - run: node --check public/assets/site.js
   browser:
     runs-on: ubuntu-latest

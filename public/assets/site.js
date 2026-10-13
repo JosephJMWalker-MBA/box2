@@ -103,6 +103,7 @@ if (lengthSelect) { lengthSelect.addEventListener('change', filterStarts); filte
 // Changing nights replaces schedule controls only; performer details and grants stay in this form.
 const nightForm = document.querySelector('#night-picker-form');
 const nightSelect = document.querySelector('#night');
+const captureChoice = document.querySelector('#capture-choice');
 if (nightForm && nightSelect && bookingForm && slotGrid && lengthSelect) {
   let pending;
   async function refreshNight() {
@@ -114,7 +115,8 @@ if (nightForm && nightSelect && bookingForm && slotGrid && lengthSelect) {
     const preferredLength = lengthSelect.value;
     lengthSelect.replaceChildren();
     try {
-      const response = await fetch(`${nightForm.dataset.slotsUrl}?night=${encodeURIComponent(nightSelect.value)}`, { signal: pending.signal });
+      const response = await fetch(nightForm.dataset.slotsUrl, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ night: nightSelect.value, capture_choice: captureChoice.value, csrf: bookingForm.querySelector('[name="csrf"]').value }), signal: pending.signal });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Stage allocations could not be loaded.');
       const durations = [...new Set(data.slots.flatMap((slot) => slot.durations))].sort((a, b) => a - b);
@@ -126,16 +128,16 @@ if (nightForm && nightSelect && bookingForm && slotGrid && lengthSelect) {
       if (durations.includes(Number(preferredLength))) lengthSelect.value = preferredLength;
       data.slots.forEach((slot) => {
         const label = document.createElement('label'); label.className = `slot ${slot.state}`;
-        label.dataset.durations = slot.durations.join(','); label.dataset.visibility = slot.visibility;
+        label.dataset.durations = slot.durations.join(',');
         const input = document.createElement('input'); input.type = 'radio'; input.name = 'slot_id'; input.required = true; input.value = String(slot.id);
         const span = document.createElement('span'); span.textContent = slot.label;
         const detail = document.createElement('small');
-        detail.textContent = slot.state !== 'available' ? slot.state : (slot.visibility === 'private' ? 'Private · no recording' : 'Public · livestream permission required');
+        detail.textContent = slot.state !== 'available' ? 'Unavailable' : (captureChoice.value === 'unrecorded' ? 'No room recording or broadcast' : 'Livestream permission required');
         span.append(detail); label.append(input, span); slotGrid.append(label);
       });
       bookingForm.querySelector('[name="night_id"]').value = nightSelect.value;
       bookingSteps.forEach((step) => { step.querySelector('fieldset').disabled = !data.bookings_enabled; });
-      status.textContent = durations.length ? `${data.night.show_date} · ${data.night.status}${data.night.override_note ? ` · ${data.night.override_note}` : ''}` : 'No consecutive open allocations fit a set on this show.';
+      status.textContent = durations.length ? `${data.night.show_date} · ${data.night.status}` : 'No consecutive open allocations fit a set on this show.';
       if (!data.bookings_enabled) status.textContent += ' Reservations are not open.';
       filterStarts();
     } catch (error) {
@@ -144,6 +146,12 @@ if (nightForm && nightSelect && bookingForm && slotGrid && lengthSelect) {
   }
   nightForm.addEventListener('submit', (event) => { event.preventDefault(); refreshNight(); });
   nightSelect.addEventListener('change', refreshNight);
+  captureChoice.addEventListener('change', () => {
+    if (captureChoice.value === 'unrecorded') {
+      ['livestream','archive','clips','adaptation'].forEach((scope) => { bookingForm.querySelector(`[name="${scope}_allowed"]`).checked = false; });
+    }
+    refreshNight();
+  });
 }
 
 document.querySelectorAll('[data-share-url]').forEach((button) => {
