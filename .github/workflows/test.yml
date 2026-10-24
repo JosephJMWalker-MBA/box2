@@ -1,0 +1,49 @@
+name: PHP MVP checks
+on: [push, pull_request]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ['8.2', '8.5']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: pdo_sqlite, mbstring, fileinfo, pcntl
+          coverage: none
+      - run: find app public bin deploy tests -name '*.php' -print0 | xargs -0 -n1 php -l
+      - run: php tests/run.php
+      - run: php tests/blocks.php
+      - run: php tests/migrations.php
+      - run: php tests/http.php
+      - run: php tests/ops.php
+      - run: node --check public/assets/site.js
+  browser:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ['8.2', '8.5']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: pdo_sqlite, mbstring, fileinfo
+          coverage: none
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --prefix "$RUNNER_TEMP/box2-browser" --no-save --no-package-lock playwright@1.62.1
+      - run: node "$RUNNER_TEMP/box2-browser/node_modules/playwright/cli.js" install --with-deps chromium
+      - run: node tests/browser.cjs
+        env:
+          BOX2_PLAYWRIGHT: ${{ runner.temp }}/box2-browser/node_modules/playwright
+          BOX2_BROWSER_CHANNEL: chromium
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: box2-responsive-php-${{ matrix.php }}
+          path: /tmp/box2-browser-*/*.png
+          retention-days: 7
