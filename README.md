@@ -12,6 +12,7 @@ This repository is the **canonical source for the new BOX2 site**, replacing an 
 - Read [docs/PRIVATE_REHEARSAL_BROADCAST_CONTINUITY.md](docs/PRIVATE_REHEARSAL_BROADCAST_CONTINUITY.md) for normal private performer bookings while the isolated Twitch house ads/sketches continue, including source-isolation tests and confidential guest protection.
 - Read [docs/PRODUCT.md](docs/PRODUCT.md) for product, audience, program, stage culture, and consent requirements.
 - Read [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for data model, PHP/SQLite stack, rollout phases, and tests.
+- Read [docs/CURATED_SHOWCASE_BOOKING.md](docs/CURATED_SHOWCASE_BOOKING.md) for the separately curated showcase standard, host review, invitation/acceptance and strict separation from open development bookings.
 - Read [docs/LAUNCH.md](docs/LAUNCH.md) before touching DNS, SSL, deployment, or publicity.
 
 ## Product model
