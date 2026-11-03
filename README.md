@@ -9,6 +9,7 @@ This repository is the **canonical source for the new BOX2 site**, replacing an 
 - Read [AGENTS.md](AGENTS.md) for implementation invariants.
 - Read [docs/OPERATING_MODEL_AND_EXECUTION_PLAN.md](docs/OPERATING_MODEL_AND_EXECUTION_PLAN.md) for the complete business model, current PR inventory, gap analysis and release sequence.
 - Read [docs/LIVE_STUDIO_AND_GALAXY_SET.md](docs/LIVE_STUDIO_AND_GALAXY_SET.md) for the observed live OBS milestone, black-to-galaxy studio plan, privacy-safe broadcast operation and host readiness checklist.
+- Read [docs/JETSON_OBS_EVENT_AND_HIGHLIGHTS.md](docs/JETSON_OBS_EVENT_AND_HIGHLIGHTS.md) for the proposed Jetson/Reolink event ledger, OBS integration gates, booking-aware stage graphics and optional community-highlight voting; this is a design only, not a live integration.
 - Read [docs/PRIVATE_REHEARSAL_BROADCAST_CONTINUITY.md](docs/PRIVATE_REHEARSAL_BROADCAST_CONTINUITY.md) for normal private performer bookings while the isolated Twitch house ads/sketches continue, including source-isolation tests and confidential guest protection.
 - Read [docs/PRODUCT.md](docs/PRODUCT.md) for product, audience, program, stage culture, and consent requirements.
 - Read [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for data model, PHP/SQLite stack, rollout phases, and tests.
