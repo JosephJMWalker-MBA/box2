@@ -101,6 +101,12 @@ class PerformerTracker:
             self.state = TrackingState.TRACKING
             return True
 
+        # While in AMBIGUOUS or LOST, an explicit onstage bounding box is mandatory.
+        # Passing box=None must be rejected to prevent clearing ambiguity without
+        # identifying the performer.
+        if self.state in (TrackingState.AMBIGUOUS, TrackingState.LOST):
+            return False
+
         self.enable()
         return True
 

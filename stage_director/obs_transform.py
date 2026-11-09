@@ -65,11 +65,14 @@ def translate_to_obs_request(
     canvas_height: int = 2160,
     source_width: Optional[int] = None,
     source_height: Optional[int] = None,
+    strategy: str = "combined",
 ) -> Optional[Dict[str, Any]]:
     """Translate an internal OBSProposal into an official OBS WebSocket v5 request.
 
-    Computes cropLeft/cropTop/cropRight/cropBottom and the exact scaleX/scaleY factors
-    and bounds needed so the cropped performer view fills the canvas.
+    Supports three transform strategies:
+      - 'combined' (default): sets boundsType='OBS_BOUNDS_SCALE_INNER' with computed scale factors.
+      - 'bounds_inner': sets boundsType='OBS_BOUNDS_SCALE_INNER' with scale=(1.0, 1.0) and crop only.
+      - 'explicit_scale': sets boundsType='OBS_BOUNDS_NONE' with explicit scaleX and scaleY.
 
     Returns None when proposal recommends capture_off.
     """
@@ -84,20 +87,38 @@ def translate_to_obs_request(
         crop_top = 0
         crop_right = 0
         crop_bottom = 0
-        scale_x = round(float(canvas_width) / src_w, 4)
-        scale_y = round(float(canvas_height) / src_h, 4)
+        visible_w = src_w
+        visible_h = src_h
     else:
         # track_face with active crop
         crop_left = proposal.obs_crop.get("left", 0)
         crop_top = proposal.obs_crop.get("top", 0)
         crop_right = proposal.obs_crop.get("right", 0)
         crop_bottom = proposal.obs_crop.get("bottom", 0)
-
         visible_w = max(1.0, src_w - crop_left - crop_right)
         visible_h = max(1.0, src_h - crop_top - crop_bottom)
 
+    if strategy == "bounds_inner":
+        # Strategy (a): OBS_BOUNDS_SCALE_INNER with crop only; scale is 1.0
+        scale_x = 1.0
+        scale_y = 1.0
+        bounds_type = "OBS_BOUNDS_SCALE_INNER"
+        bounds_w = float(canvas_width)
+        bounds_h = float(canvas_height)
+    elif strategy == "explicit_scale":
+        # Strategy (b): explicit scale with bounds NONE
         scale_x = round(float(canvas_width) / visible_w, 4)
         scale_y = round(float(canvas_height) / visible_h, 4)
+        bounds_type = "OBS_BOUNDS_NONE"
+        bounds_w = 0.0
+        bounds_h = 0.0
+    else:
+        # Strategy (c): combined scale + bounds SCALE_INNER (default)
+        scale_x = round(float(canvas_width) / visible_w, 4)
+        scale_y = round(float(canvas_height) / visible_h, 4)
+        bounds_type = "OBS_BOUNDS_SCALE_INNER"
+        bounds_w = float(canvas_width)
+        bounds_h = float(canvas_height)
 
     transform = OBSSceneItemTransform(
         cropLeft=crop_left,
@@ -110,10 +131,10 @@ def translate_to_obs_request(
         scaleY=scale_y,
         rotation=0.0,
         alignment=5,
-        boundsType="OBS_BOUNDS_SCALE_INNER",
+        boundsType=bounds_type,
         boundsAlignment=0,
-        boundsWidth=float(canvas_width),
-        boundsHeight=float(canvas_height),
+        boundsWidth=bounds_w,
+        boundsHeight=bounds_h,
     )
 
     return {

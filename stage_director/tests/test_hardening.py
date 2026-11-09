@@ -110,6 +110,41 @@ class TrackingHardeningTests(unittest.TestCase):
         self.assertEqual(self.tracker.active_subject, person_b)
         self.assertEqual(self.tracker.state, TrackingState.TRACKING)
 
+    def test_ambiguous_no_box_confirm_rejected_and_does_not_auto_acquire_stranger(self):
+        """Confirming without a specific box while ambiguous must be rejected and not auto-acquire stranger."""
+        self.tracker.enable()
+        perf_a = BoundingBox(x=1800.0, y=800.0, width=120.0, height=150.0)
+        self.tracker.update([perf_a], monotonic_seconds=10.0)
+        self.assertEqual(self.tracker.state, TrackingState.TRACKING)
+
+        # Performer A lost for > 2 seconds
+        self.tracker.update([], monotonic_seconds=13.0)
+        self.assertEqual(self.tracker.state, TrackingState.LOST)
+
+        # Stranger B appears near A's prior position -> enters AMBIGUOUS
+        person_b = BoundingBox(x=1800.0, y=800.0, width=120.0, height=150.0)
+        res1 = self.tracker.update([person_b], monotonic_seconds=13.5)
+        self.assertEqual(res1.state, TrackingState.AMBIGUOUS)
+        self.assertIsNone(res1.active_subject)
+
+        # Operator calls confirm_subject(None) without a specific box
+        confirmed = self.tracker.confirm_subject(None, monotonic_seconds=14.0)
+        self.assertFalse(confirmed, "confirm_subject(None) must fail when ambiguous")
+        self.assertEqual(self.tracker.state, TrackingState.AMBIGUOUS)
+        self.assertIsNone(self.tracker.active_subject)
+
+        # Next frame with stranger B still present: B must NOT be auto-acquired!
+        res2 = self.tracker.update([person_b], monotonic_seconds=14.5)
+        self.assertEqual(res2.state, TrackingState.AMBIGUOUS)
+        self.assertIsNone(res2.active_subject)
+        self.assertIn("performer_confirmation_required", res2.events)
+
+        # Only explicit confirmation with B's box locks onto B
+        confirmed_b = self.tracker.confirm_subject(person_b, monotonic_seconds=15.0)
+        self.assertTrue(confirmed_b)
+        self.assertEqual(self.tracker.state, TrackingState.TRACKING)
+        self.assertEqual(self.tracker.active_subject, person_b)
+
     def test_multiple_onstage_faces_initial_acquisition_is_ambiguous(self):
         """When multiple faces appear onstage on initial frame, do NOT pick largest; require confirmation."""
         self.tracker.enable()

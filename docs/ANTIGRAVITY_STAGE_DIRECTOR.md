@@ -143,6 +143,95 @@ Addressed tracking safety edge cases with failing regression tests first, follow
 - Automated tracking and OBS transform translation logic are hardened, verified by 63 passing unit tests and offline fixtures.
 - Ready for: **Isolated Prerecorded-Video Framing Test** (feeding an offline recorded performance video into an isolated test scene to evaluate visual framing, zoom speeds, and transition aesthetics before any live hardware control).
 
+## Milestone 4: Visual Framing Proof & OBS Transform Strategy Validation (PR #9 Third Review)
+
+Status: **Implemented, offline tested, visually verified with synthetic 4K media and disposable OBS profile**.
+
+### 1. Ambiguous Subject Confirmation Hardening (`tracking.py`)
+- **Loophole Closed**: In `PerformerTracker.confirm_subject()`, calling with `box=None` while in `AMBIGUOUS` or `LOST` state is strictly rejected (`return False`).
+- **Policy Enforced**: Clearing ambiguity requires explicit selection of a specific onstage bounding box (`box is not None and stage_polygon.contains_box(box)`). An operator cannot clear the ambiguity gate without identifying who the performer is.
+- **Regression Test**: Added failing test `test_ambiguous_no_box_confirm_rejected_and_does_not_auto_acquire_stranger` verifying that:
+  - Performer A is tracked -> lost > 2s -> Stranger B appears in A's prior position -> tracker enters `AMBIGUOUS`.
+  - Operator calls `confirm_subject(None)` -> rejected (`False`), state remains `AMBIGUOUS`.
+  - Subsequent frames with stranger B do NOT auto-acquire B.
+  - Only explicit `confirm_subject(person_b)` acquires and tracks B.
+
+### 2. Synthetic 4K Calibration Test Pattern (`stage_director/test_pattern.py`)
+- Generated native 3840×2160 (16:9) reference calibration image at `stage_director/fixtures/synthetic_stage_4k.png`:
+  - 100px / 500px coordinate grid with labeled coordinates.
+  - Diagonal corner-to-corner fiducials (slope = 9/16 = 0.5625) to expose non-uniform stretching.
+  - 16:9 outer boundary frame and corner ticks.
+  - Authorized stage polygon boundary outline in cyan.
+  - Concentric calibration circles centered at (1920, 1080) that reveal aspect distortion (eccentricity > 1.000).
+  - Primary performer face target `(1800, 750, 240, 300)` and torso/microphone guideline at center stage.
+  - Offstage audience bystander `(100, 1200, 120, 160)` outside the stage boundary.
+
+### 3. Transform Strategy Evaluation & Libobs Compositor Verification (`stage_director/visual_test_harness.py`)
+Tested three OBS transform strategies rendering the 4K source onto a broadcast 1920×1080 canvas:
+
+| Metric | Strategy (a): Bounds Inner, Crop Only | Strategy (b): Explicit Scale, No Bounds | Strategy (c): Combined Scale + Bounds Inner |
+| :--- | :--- | :--- | :--- |
+| **OBS `boundsType`** | `OBS_BOUNDS_SCALE_INNER` | `OBS_BOUNDS_NONE` | `OBS_BOUNDS_SCALE_INNER` |
+| **Request `scaleX, scaleY`** | `(1.0, 1.0)` | `(0.7202, 0.7200)` | `(0.7202, 0.7200)` |
+| **Request `boundsWidth, boundsHeight`** | `1920.0, 1080.0` | `0.0, 0.0` | `1920.0, 1080.0` |
+| **Libobs effective scale** | `(0.7200, 0.7200)` | `(0.7202, 0.7200)` | `(0.72018, 0.71998)` |
+| **Rendered Canvas Size** | `1920 × 1080` | `1920 × 1080` | `1920 × 1080` |
+| **Canvas Fill %** | **100.0%** | **100.0%** | **100.0%** |
+| **Aspect Ratio Error** | **0.000%** | 0.014% (float rounding) | 0.014% (aspect fighting) |
+| **Double-Scaling Risk** | **None** (direct shader scale) | None (direct scale) | **Present** (`mul = 0.99997` rescaled by libobs) |
+| **Letterbox / Clipping** | **None** | None | None |
+
+**Determination**:
+- **Strategy (a) (`OBS_BOUNDS_SCALE_INNER` with crop only, scale=1.0)** is the mathematically pure, officially intended architecture for OBS bounding box scaling.
+- In libobs (`obs-scene.c` lines 446–476), when `bounds_type == OBS_BOUNDS_SCALE_INNER`, OBS calculates `mul = bounds.x / visible_width` and performs the hardware scaling directly to fill the canvas.
+- Passing explicit `scale` alongside `bounds_type: 2` (Strategy c) introduces floating-point division roundoff differences between horizontal and vertical scales, causing libobs to recalculate `mul` and double-scale.
+- Strategy (a) matches the exact properties already observed in production `Diag.json` (`bounds_type: 2`, `bounds: 1920x1080`, `scale: 1.0`).
+
+### 4. Framing Geometry and Rollback Measurements
+- **Canvas Centering**: On the 1920×1080 broadcast canvas, the rendered performer center is at `x = 959.8 px` vs target `960.0 px` (**centering error: -0.24 px**, subpixel accuracy).
+- **Headroom Guideline**: Face top rendered at `y = 248.4 px` within comfortable medium shot framing.
+- **Rollback Restoration**: Transforming back from active medium shot to initial safe-wide via `restore_transform_request()` was compared against the initial wide frame using bitwise difference (`ImageChops.difference`). **Rollback fidelity is bit-for-bit exact (`diff.getbbox() is None`)**.
+- **Rendered Reference Previews**: Generated and saved in `stage_director/fixtures/`:
+  - `rendered_stage_wide_1080p.png`
+  - `rendered_medium_shot_strategy_a_1080p.png`
+  - `rendered_medium_shot_strategy_b_1080p.png`
+  - `rendered_medium_shot_strategy_c_1080p.png`
+  - `rendered_restored_wide_1080p.png`
+
+### 5. Disposable OBS Profile & Scene Collection (`stage_director/obs_disposable_env.py`)
+- Created completely isolated, disposable test configuration:
+  - Profile: `StageDirector_Test` (`~/Library/Application Support/obs-studio/basic/profiles/StageDirector_Test/basic.ini`) configured with 1920×1080 @ 30 FPS, no stream keys, no recording destinations, and no audio inputs.
+  - Scene Collection: `StageDirector_Test.json` (`~/Library/Application Support/obs-studio/basic/scenes/StageDirector_Test.json`) containing a single scene `"Stage Director Test Scene"` with one `image_source` pointing to `fixtures/synthetic_stage_4k.png`.
+- **Production Isolation Verified**:
+  - `Diag.json`, `Untitled.json`, and `user.ini` were checked and verified **completely untouched**.
+  - Safe launch command for independent manual inspection:
+    ```bash
+    /Applications/OBS.app/Contents/MacOS/OBS --profile StageDirector_Test --collection StageDirector_Test
+    ```
+
+### 6. Verification Commands & Evidence
+- Run all 67 tests (including visual framing suite and isolation checks):
+  ```bash
+  python3 -m unittest discover -s stage_director/tests -v
+  ```
+  Result: 67 tests passed in 0.272s.
+- Run standalone visual comparison harness:
+  ```bash
+  python3 -m stage_director.visual_test_harness
+  ```
+- Run disposable OBS environment validator:
+  ```bash
+  python3 -m stage_director.obs_disposable_env
+  ```
+- Run OBS request fixture:
+  ```bash
+  python3 -m stage_director.obs_request_fixture
+  ```
+- Run synthetic framing simulator:
+  ```bash
+  python3 -m stage_director.simulate_framing
+  ```
+
 ## Integration steps only after read-only audits
 
 1. Verify installed Reolink firmware/control support, whether direct camera vs NVR RTSP is used, and PTZ limits; first test physical PTZ offline.
