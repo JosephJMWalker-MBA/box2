@@ -247,11 +247,21 @@ class StageFramingAdapterTests(unittest.TestCase):
         self.arm_and_start()
 
         face1 = BoundingBox(x=1860.0, y=700.0, width=120.0, height=150.0)
-        prop1 = self.adapter.process_frame([face1], START + timedelta(seconds=1), 101.0)
+        # Settle framing on performer over 5 seconds (from 3840 wide to 1600 zoom)
+        for i in range(1, 100):
+            prop1 = self.adapter.process_frame(
+                [face1],
+                START + timedelta(seconds=1, milliseconds=i * 50),
+                101.0 + i * 0.05
+            )
 
         # Move 10px in X and 8px in Y (deadzones are 40px and 30px)
         face2 = BoundingBox(x=1870.0, y=708.0, width=120.0, height=150.0)
-        prop2 = self.adapter.process_frame([face2], START + timedelta(seconds=1, milliseconds=100), 101.1)
+        prop2 = self.adapter.process_frame(
+            [face2],
+            START + timedelta(seconds=6, milliseconds=50),
+            106.05
+        )
 
         self.assertEqual(prop1.obs_crop, prop2.obs_crop)
         self.assertEqual(prop1.framing["center_x"], prop2.framing["center_x"])

@@ -66,11 +66,16 @@ Status: **Implemented, offline tested, zero live hardware or network connection*
 
 ### Verification evidence
 
-Run all 51 tests:
+Run all 60 tests (including hardening and translator regression suites):
 ```bash
 python3 -m unittest discover -s stage_director/tests -v
 ```
-Result: 51 tests passed in 0.003s.
+Result: 60 tests passed in 0.011s.
+
+Run OBS WebSocket v5 request fixture validator:
+```bash
+python3 -m stage_director.obs_request_fixture
+```
 
 Run synthetic framing simulator:
 ```bash
@@ -78,6 +83,24 @@ python3 -m stage_director.simulate --framing
 # or
 python3 -m stage_director.simulate_framing
 ```
+
+## Hardened Tracking & OBS Transform Milestone (PR #9 Review Findings)
+
+Addressed all three P1 review findings using failing regression tests first:
+
+1. **P1 — Gated Spatial Matching & Subject Stealing Prevention (`tracking.py`)**:
+   - Replaced unconstrained Euclidean distance matching with gated spatial continuity (`_is_plausible_match`): maximum distance scaled by elapsed time (`base_match_radius_px + max_performer_speed_px_s * dt`) and area ratio bounds (`max_area_ratio = 3.0`).
+   - If Performer A vanishes while Person B is on stage, B is rejected as an implausible match; the tracker holds for A without switching targets.
+   - Added `TrackingState.AMBIGUOUS` and `require_confirmation_after_loss` policy: prolonged loss (>2s) transitions to ambiguous/lost, requiring host confirmation rather than silently adopting a stranger.
+2. **P1 — First Frame Speed Limits & Smoothing from Safe-Wide (`framing.py`)**:
+   - Time anchor is properly initialized upon arming and host start; FramingEngine starts strictly from safe-wide (`zoom = 1.0x`) and applies velocity capping (`max_zoom_speed_px_s`, `max_pan_speed_px_s`) and exponential smoothing from the very first frame.
+   - Guarded against long stalls or paused frames via `max_step_dt = 0.50s`.
+   - Verified zoom hysteresis against small face size noise within deadzone.
+3. **P1 — OBS WebSocket v5 SetSceneItemTransform Translator (`obs_transform.py`, `obs_request_fixture.py`)**:
+   - Implemented `translate_to_obs_request()` converting internal proposals to official OBS WebSocket v5 `SetSceneItemTransform` requests.
+   - Generates exact `cropLeft`, `cropTop`, `cropRight`, `cropBottom` integer coordinates, calculates scale factors (`scaleX = canvas_width / visible_width`, `scaleY = canvas_height / visible_height`), sets `boundsType = "OBS_BOUNDS_SCALE_INNER"`, and uses top-left alignment `5`.
+   - Implemented `create_transform_backup()` and `restore_transform_request()` for clean operator rollback.
+   - Standalone `obs_request_fixture.py` validates outgoing request shape, integer crop constraints, and 16:9 aspect ratio at wide, medium, and boundary positions with zero network dependencies.
 
 ## Integration steps only after read-only audits
 

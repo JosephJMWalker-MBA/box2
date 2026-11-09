@@ -45,7 +45,7 @@ class StageFramingAdapter:
         """Arm a consented set; defaults camera to safe wide shot."""
         decision = self.director.arm(booking, now_utc)
         self.tracker.disable()
-        self.framing.reset()
+        self.framing.reset(monotonic_seconds=0.0)
         self._was_active = False
         return self._make_proposal(
             decision=decision,
@@ -64,6 +64,7 @@ class StageFramingAdapter:
         )
         if decision.mode == Mode.LIVE:
             self.tracker.enable()
+            self.framing.reset(monotonic_seconds=monotonic_seconds)
             self._was_active = True
             return self._make_proposal(
                 decision=decision,
@@ -88,7 +89,7 @@ class StageFramingAdapter:
         """Stop performance immediately; fails closed to capture_off."""
         decision = self.director.stop(reason)
         self.tracker.disable()
-        self.framing.reset()
+        self.framing.reset(monotonic_seconds=monotonic_seconds)
         events = ["camera_auto_disabled"] if self._was_active else []
         self._was_active = False
         now = now_utc or datetime.now(timezone.utc)
@@ -107,7 +108,7 @@ class StageFramingAdapter:
         decision = self.director.refresh(booking, now_utc)
         if decision.camera_action == CameraAction.CAPTURE_OFF:
             self.tracker.disable()
-            self.framing.reset()
+            self.framing.reset(monotonic_seconds=monotonic_seconds)
             events = ["camera_auto_disabled"] if self._was_active else []
             self._was_active = False
             return self._make_proposal(

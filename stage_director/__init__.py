@@ -3,7 +3,13 @@ from .core import BookingSnapshot, CameraAction, Cue, Decision, Mode, StageDirec
 from .geometry import BoundingBox, StagePolygon
 from .framing import FramingConfig, FramingEngine, FramingWindow
 from .tracking import PerformerTracker, TrackingResult, TrackingState
-from .obs_transform import OBSProposal
+from .obs_transform import (
+    OBSProposal,
+    OBSSceneItemTransform,
+    translate_to_obs_request,
+    create_transform_backup,
+    restore_transform_request,
+)
 from .adapter import StageFramingAdapter
 
 __all__ = [
@@ -22,5 +28,9 @@ __all__ = [
     "TrackingResult",
     "TrackingState",
     "OBSProposal",
+    "OBSSceneItemTransform",
+    "translate_to_obs_request",
+    "create_transform_backup",
+    "restore_transform_request",
     "StageFramingAdapter",
 ]

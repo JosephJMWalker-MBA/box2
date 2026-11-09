@@ -1,4 +1,4 @@
-"""Performer tracking engine with stage-only area and subject-loss hold.
+"""Performer tracking engine with stage-only area, spatial gating, and subject-loss hold.
 
 Strictly spatial tracking only: NO biometric face recognition, embeddings,
 enrollment, or identity profiles.
@@ -19,6 +19,7 @@ class TrackingState(str, Enum):
     TRACKING = "tracking"
     HOLDING = "holding"
     LOST = "lost"
+    AMBIGUOUS = "ambiguous"
 
 
 @dataclass(frozen=True)
@@ -32,18 +33,31 @@ class TrackingResult:
 
 
 class PerformerTracker:
-    """Tracks a single primary stage performer while ignoring bystanders.
+    """Tracks a single primary stage performer while ignoring bystanders and preventing subject stealing.
 
     - Excludes faces outside the stage polygon.
     - Locks onto the confirmed performer; secondary people on stage are ignored.
+    - Gated spatial matching: rejects implausible jumps (distance scaled to elapsed time)
+      and area inconsistencies to prevent latching onto a bystander when performer vanishes.
     - Temporarily holds framing during brief occlusions / head turns.
     - Smoothly transitions to safe wide only after a subject-loss timeout.
+    - Policy for host-confirmed reacquisition after extended loss rather than silently following strangers.
     """
 
     def __init__(self, stage_polygon: Optional[StagePolygon] = None,
-                 loss_hold_seconds: float = 2.0) -> None:
+                 loss_hold_seconds: float = 2.0,
+                 min_confidence: float = 0.50,
+                 base_match_radius_px: float = 400.0,
+                 max_performer_speed_px_s: float = 1500.0,
+                 max_area_ratio: float = 3.0,
+                 require_confirmation_after_loss: bool = True) -> None:
         self.stage_polygon = stage_polygon or StagePolygon.default_stage()
         self.loss_hold_seconds = loss_hold_seconds
+        self.min_confidence = min_confidence
+        self.base_match_radius_px = base_match_radius_px
+        self.max_performer_speed_px_s = max_performer_speed_px_s
+        self.max_area_ratio = max_area_ratio
+        self.require_confirmation_after_loss = require_confirmation_after_loss
 
         self.state: TrackingState = TrackingState.DISABLED
         self.active_subject: Optional[BoundingBox] = None
@@ -52,7 +66,7 @@ class PerformerTracker:
 
     def enable(self) -> None:
         """Enable tracking (transitions from DISABLED to ACQUIRING)."""
-        if self.state == TrackingState.DISABLED:
+        if self.state in (TrackingState.DISABLED, TrackingState.AMBIGUOUS):
             self.state = TrackingState.ACQUIRING
             self.active_subject = None
             self._held_subject = None
@@ -89,6 +103,22 @@ class PerformerTracker:
         self.state = TrackingState.TRACKING
         return True
 
+    def _is_plausible_match(self, candidate: BoundingBox, anchor: BoundingBox,
+                            dt: float) -> bool:
+        """Gated spatial matching: check if candidate is a plausible continuation of anchor."""
+        # 1. Distance gate scaled by elapsed time
+        max_dist = self.base_match_radius_px + self.max_performer_speed_px_s * dt
+        dist = candidate.distance_to(anchor)
+        if dist > max_dist:
+            return False
+
+        # 2. Area consistency gate (prevent sudden 3x+ size jump in fraction of a second)
+        ratio = max(candidate.area / anchor.area, anchor.area / candidate.area)
+        if ratio > self.max_area_ratio:
+            return False
+
+        return True
+
     def update(self, detections: Sequence[BoundingBox],
                monotonic_seconds: float) -> TrackingResult:
         """Process candidate face detections for the current frame."""
@@ -103,10 +133,12 @@ class PerformerTracker:
 
         events: List[str] = []
 
-        # 1. Filter out offstage bystanders using the stage polygon
+        # 1. Filter out offstage bystanders and low-confidence detections
         onstage_boxes: List[BoundingBox] = []
         offstage_count = 0
         for box in detections:
+            if box.confidence < self.min_confidence:
+                continue
             if self.stage_polygon.contains_box(box):
                 onstage_boxes.append(box)
             else:
@@ -114,28 +146,110 @@ class PerformerTracker:
 
         onstage_count = len(onstage_boxes)
 
-        # 2. Case A: Onstage candidate(s) detected
-        if onstage_boxes:
-            if self.active_subject is None:
-                # No active track: acquire best candidate (largest face on stage)
-                chosen = max(onstage_boxes, key=lambda b: b.area)
-                self.active_subject = chosen
-                self._held_subject = chosen
-                self._last_seen_monotonic = monotonic_seconds
-                self.state = TrackingState.TRACKING
-                events.append("camera_subject_acquired")
-            else:
-                # Match candidate closest to current active subject position
-                anchor = self._held_subject or self.active_subject
-                matched = min(onstage_boxes, key=lambda b: b.distance_to(anchor))
+        # 2. Case A: Active performer is currently tracked (or holding)
+        if self.active_subject is not None or self.state == TrackingState.HOLDING:
+            anchor = self._held_subject or self.active_subject
+            assert anchor is not None
+            dt = max(0.001, monotonic_seconds - (self._last_seen_monotonic or monotonic_seconds))
+
+            # Filter onstage boxes to only plausible matches for this performer
+            plausible_matches = [
+                b for b in onstage_boxes
+                if self._is_plausible_match(b, anchor, dt)
+            ]
+
+            if plausible_matches:
+                # Match closest plausible box
+                matched = min(plausible_matches, key=lambda b: b.distance_to(anchor))
                 self.active_subject = matched
                 self._held_subject = matched
                 self._last_seen_monotonic = monotonic_seconds
 
-                if self.state in (TrackingState.HOLDING, TrackingState.LOST):
+                if self.state in (TrackingState.HOLDING, TrackingState.LOST, TrackingState.AMBIGUOUS):
                     events.append("camera_subject_reacquired")
                 self.state = TrackingState.TRACKING
 
+                return TrackingResult(
+                    state=self.state,
+                    active_subject=self.active_subject,
+                    events=events,
+                    onstage_count=onstage_count,
+                    offstage_count=offstage_count,
+                )
+
+            # No plausible candidate matches active subject (performer vanished, occluded, or jumped)
+            if self._last_seen_monotonic is not None:
+                time_lost = monotonic_seconds - self._last_seen_monotonic
+                if time_lost <= self.loss_hold_seconds:
+                    self.state = TrackingState.HOLDING
+                    # Keep held subject for framing reference, do NOT latch onto bystanders
+                    return TrackingResult(
+                        state=TrackingState.HOLDING,
+                        active_subject=self._held_subject,
+                        events=[],
+                        onstage_count=onstage_count,
+                        offstage_count=offstage_count,
+                    )
+                else:
+                    if self.state == TrackingState.HOLDING:
+                        events.append("camera_subject_lost")
+                    self.state = TrackingState.LOST
+                    self.active_subject = None
+                    return TrackingResult(
+                        state=TrackingState.LOST,
+                        active_subject=None,
+                        events=events,
+                        onstage_count=onstage_count,
+                        offstage_count=offstage_count,
+                    )
+
+        # 3. Case B: No active performer (state is ACQUIRING, LOST, or AMBIGUOUS)
+        if onstage_boxes:
+            # If recovering after extended loss (>2s):
+            if self.state in (TrackingState.LOST, TrackingState.AMBIGUOUS):
+                if self.require_confirmation_after_loss:
+                    # Check if an onstage candidate plausibly matches last confirmed performer
+                    if self._held_subject is not None:
+                        # Allow wider reacquisition radius for returning performer
+                        reacquire_radius = self.base_match_radius_px * 1.5
+                        matches = [
+                            b for b in onstage_boxes
+                            if b.distance_to(self._held_subject) <= reacquire_radius
+                        ]
+                        if len(matches) == 1 and len(onstage_boxes) == 1:
+                            chosen = matches[0]
+                            self.active_subject = chosen
+                            self._held_subject = chosen
+                            self._last_seen_monotonic = monotonic_seconds
+                            self.state = TrackingState.TRACKING
+                            events.append("camera_subject_reacquired")
+                            return TrackingResult(
+                                state=self.state,
+                                active_subject=self.active_subject,
+                                events=events,
+                                onstage_count=onstage_count,
+                                offstage_count=offstage_count,
+                            )
+
+                    # Does not match last known performer or multiple people present:
+                    # Ambiguous! Require host confirmation rather than silently following a stranger
+                    self.state = TrackingState.AMBIGUOUS
+                    events.append("performer_confirmation_required")
+                    return TrackingResult(
+                        state=TrackingState.AMBIGUOUS,
+                        active_subject=None,
+                        events=events,
+                        onstage_count=onstage_count,
+                        offstage_count=offstage_count,
+                    )
+
+            # ACQUIRING at set start
+            chosen = max(onstage_boxes, key=lambda b: b.area)
+            self.active_subject = chosen
+            self._held_subject = chosen
+            self._last_seen_monotonic = monotonic_seconds
+            self.state = TrackingState.TRACKING
+            events.append("camera_subject_acquired")
             return TrackingResult(
                 state=self.state,
                 active_subject=self.active_subject,
@@ -144,38 +258,12 @@ class PerformerTracker:
                 offstage_count=offstage_count,
             )
 
-        # 3. Case B: NO onstage candidate detected (lost face / turned head / off stage)
-        if self._last_seen_monotonic is not None:
-            time_lost = monotonic_seconds - self._last_seen_monotonic
-            if time_lost <= self.loss_hold_seconds:
-                # Temporary loss: hold framing steady
-                self.state = TrackingState.HOLDING
-                # Subject remains held for framing reference
-                return TrackingResult(
-                    state=TrackingState.HOLDING,
-                    active_subject=self._held_subject,
-                    events=[],
-                    onstage_count=0,
-                    offstage_count=offstage_count,
-                )
-            else:
-                # Timeout exceeded: transition to LOST
-                if self.state == TrackingState.HOLDING:
-                    events.append("camera_subject_lost")
-                self.state = TrackingState.LOST
-                self.active_subject = None
-                return TrackingResult(
-                    state=TrackingState.LOST,
-                    active_subject=None,
-                    events=events,
-                    onstage_count=0,
-                    offstage_count=offstage_count,
-                )
+        # No onstage boxes detected
+        if self.state not in (TrackingState.LOST, TrackingState.AMBIGUOUS):
+            self.state = TrackingState.ACQUIRING
 
-        # Never seen anyone yet
-        self.state = TrackingState.ACQUIRING
         return TrackingResult(
-            state=TrackingState.ACQUIRING,
+            state=self.state,
             active_subject=None,
             events=[],
             onstage_count=0,

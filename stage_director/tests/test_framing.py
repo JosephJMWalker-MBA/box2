@@ -69,17 +69,19 @@ class FramingTests(unittest.TestCase):
         self.assertLessEqual(target.bottom, 2160.0)
 
     def test_dead_zone_suppresses_jitter(self):
-        # First tick initializes framing
+        # Let framing settle on performer over 5 seconds (from 3840 wide to 1600 zoom)
         face1 = BoundingBox(x=1870.0, y=700.0, width=100.0, height=150.0)
-        w1 = self.engine.update(face1, monotonic_seconds=10.0)
+        for i in range(1, 100):
+            w1 = self.engine.update(face1, monotonic_seconds=10.0 + i * 0.05)
 
         # Small micro-twitch: moves only 15px in X and 10px in Y (well below 40px/30px deadzones)
         face2 = BoundingBox(x=1885.0, y=710.0, width=100.0, height=150.0)
-        w2 = self.engine.update(face2, monotonic_seconds=10.1)
+        w2 = self.engine.update(face2, monotonic_seconds=15.05)
 
-        # Framing center should remain unchanged
+        # Framing center and dimensions should remain unchanged
         self.assertEqual(w1.center_x, w2.center_x)
         self.assertEqual(w1.center_y, w2.center_y)
+        self.assertEqual(w1.width, w2.width)
 
     def test_fast_movement_rate_limited(self):
         # Performer starts at center

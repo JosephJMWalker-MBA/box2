@@ -94,10 +94,16 @@ class FramingConfig:
     max_pan_speed_px_s: float = 1200.0
     max_tilt_speed_px_s: float = 800.0
     max_zoom_speed_px_s: float = 600.0
+    # Maximum dt to apply in a single update step (clamps pauses / stalls)
+    max_step_dt: float = 0.50
 
 
 class FramingEngine:
-    """Maintains a smoothed virtual camera crop window following a performer."""
+    """Maintains a smoothed virtual camera crop window following a performer.
+
+    Always starts from safe-wide and smoothly eases into position/zoom obeying
+    strict velocity limits and smoothing filters from the very first frame.
+    """
 
     def __init__(self, config: Optional[FramingConfig] = None) -> None:
         self.config = config or FramingConfig()
@@ -105,8 +111,8 @@ class FramingEngine:
         self._last_monotonic: Optional[float] = None
         self.reset()
 
-    def reset(self) -> None:
-        """Reset camera framing to the default safe-wide shot."""
+    def reset(self, monotonic_seconds: Optional[float] = None) -> None:
+        """Reset camera framing to the default safe-wide shot with optional time anchor."""
         w = float(self.config.canvas_width)
         h = float(self.config.canvas_height)
         self._current_window = FramingWindow(
@@ -115,7 +121,7 @@ class FramingEngine:
             width=w,
             height=h,
         )
-        self._last_monotonic = None
+        self._last_monotonic = monotonic_seconds
 
     @property
     def current_window(self) -> FramingWindow:
@@ -148,11 +154,7 @@ class FramingEngine:
         target_w = max(min_w, min(max_w, desired_w))
         target_h = target_w * (9.0 / 16.0)
 
-        # 3. Headroom positioning:
-        # We want face.center_y to be at (target_top + headroom_fraction * target_h)
-        # target_top = target_center_y - target_h / 2
-        # => face.center_y = target_center_y - target_h / 2 + headroom_fraction * target_h
-        # => target_center_y = face.center_y + (0.5 - headroom_fraction) * target_h
+        # 3. Headroom positioning: face center at headroom_fraction from top of crop
         target_center_y = face.center_y + (0.5 - self.config.headroom_fraction) * target_h
         target_center_x = face.center_x
 
@@ -170,20 +172,25 @@ class FramingEngine:
         )
 
     def update(self, face: Optional[BoundingBox], monotonic_seconds: float) -> FramingWindow:
-        """Update and smooth camera framing towards the target window."""
+        """Update and smooth camera framing towards the target window.
+
+        Applies velocity limits and exponential smoothing from the very first frame,
+        transitioning smoothly from safe-wide rather than instantly jumping to target.
+        """
         target = self.compute_target_window(face)
         curr = self.current_window
 
         if self._last_monotonic is None:
-            # First tick: set framing directly
-            self._current_window = target
+            # Time anchor uninitialized: anchor at monotonic_seconds and return safe-wide
             self._last_monotonic = monotonic_seconds
-            return self._current_window
+            return curr
 
-        dt = max(0.001, monotonic_seconds - self._last_monotonic)
+        # Compute dt and clamp maximum step to avoid jumps on long stalls
+        raw_dt = monotonic_seconds - self._last_monotonic
+        dt = max(0.001, min(self.config.max_step_dt, raw_dt))
         self._last_monotonic = monotonic_seconds
 
-        # 1. Dead-zone test: suppress minor twitches
+        # 1. Dead-zone & Zoom hysteresis tests
         eff_target_x = target.center_x
         if abs(eff_target_x - curr.center_x) <= self.config.deadzone_x_px:
             eff_target_x = curr.center_x
@@ -196,30 +203,26 @@ class FramingEngine:
         if abs(eff_target_w - curr.width) <= self.config.deadzone_zoom_px:
             eff_target_w = curr.width
 
-        # 2. Speed limiting: clamp max movement rate
-        max_dx = self.config.max_pan_speed_px_s * dt
-        dx = eff_target_x - curr.center_x
-        dx_clamped = max(-max_dx, min(max_dx, dx))
-        limited_x = curr.center_x + dx_clamped
-
-        max_dy = self.config.max_tilt_speed_px_s * dt
-        dy = eff_target_y - curr.center_y
-        dy_clamped = max(-max_dy, min(max_dy, dy))
-        limited_y = curr.center_y + dy_clamped
-
-        max_dw = self.config.max_zoom_speed_px_s * dt
-        dw = eff_target_w - curr.width
-        dw_clamped = max(-max_dw, min(max_dw, dw))
-        limited_w = curr.width + dw_clamped
-
-        # 3. Exponential smoothing filter
+        # 2. Exponential smoothing + Velocity limiting
         alpha = 1.0 - math.exp(-dt / self.config.smoothing_tau)
-        new_x = curr.center_x + alpha * (limited_x - curr.center_x)
-        new_y = curr.center_y + alpha * (limited_y - curr.center_y)
-        new_w = curr.width + alpha * (limited_w - curr.width)
+
+        raw_step_x = alpha * (eff_target_x - curr.center_x)
+        max_dx = self.config.max_pan_speed_px_s * dt
+        step_x = max(-max_dx, min(max_dx, raw_step_x))
+        new_x = curr.center_x + step_x
+
+        raw_step_y = alpha * (eff_target_y - curr.center_y)
+        max_dy = self.config.max_tilt_speed_px_s * dt
+        step_y = max(-max_dy, min(max_dy, raw_step_y))
+        new_y = curr.center_y + step_y
+
+        raw_step_w = alpha * (eff_target_w - curr.width)
+        max_dw = self.config.max_zoom_speed_px_s * dt
+        step_w = max(-max_dw, min(max_dw, raw_step_w))
+        new_w = curr.width + step_w
         new_h = new_w * (9.0 / 16.0)
 
-        # 4. Final safety boundary clamp
+        # 3. Final safety boundary clamp
         canvas_w = float(self.config.canvas_width)
         canvas_h = float(self.config.canvas_height)
         half_w = new_w / 2.0
