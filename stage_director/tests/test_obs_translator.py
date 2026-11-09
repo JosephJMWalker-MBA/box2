@@ -97,6 +97,83 @@ class OBSTranslatorTests(unittest.TestCase):
         self.assertEqual(restore_req["requestType"], "SetSceneItemTransform")
         self.assertEqual(restore_req["requestData"]["sceneItemTransform"]["positionX"], 100.0)
 
+    def test_invalid_strategy_rejected(self):
+        """translate_to_obs_request must raise ValueError on unknown strategies."""
+        proposal = OBSProposal(
+            schema_version="1.0",
+            timestamp_utc="2026-11-09T22:00:00Z",
+            monotonic_seconds=1000.0,
+            mode="live",
+            camera_action="track_face",
+            tracking_state="tracking",
+            subject_lost=False,
+            source_resolution={"width": 3840, "height": 2160},
+            obs_crop={"left": 100, "top": 100, "right": 100, "bottom": 100},
+            framing={"center_x": 1920.0, "center_y": 1080.0, "width": 3640, "height": 1960, "zoom_factor": 1.05},
+            events=[],
+        )
+        with self.assertRaises(ValueError) as ctx:
+            translate_to_obs_request(proposal, "TestScene", 1, strategy="unknown_strategy")
+        self.assertIn("Invalid strategy", str(ctx.exception))
+
+    def test_invalid_crop_dimensions_rejected(self):
+        """translate_to_obs_request must reject non-finite, negative, or excessive crops."""
+        base_kwargs = dict(
+            schema_version="1.0",
+            timestamp_utc="2026-11-09T22:00:00Z",
+            monotonic_seconds=1000.0,
+            mode="live",
+            camera_action="track_face",
+            tracking_state="tracking",
+            subject_lost=False,
+            source_resolution={"width": 3840, "height": 2160},
+            framing={},
+            events=[],
+        )
+
+        # Negative crop
+        prop_neg = OBSProposal(obs_crop={"left": -10, "top": 0, "right": 0, "bottom": 0}, **base_kwargs)
+        with self.assertRaises(ValueError):
+            translate_to_obs_request(prop_neg, "TestScene", 1)
+
+        # NaN crop
+        prop_nan = OBSProposal(obs_crop={"left": float("nan"), "top": 0, "right": 0, "bottom": 0}, **base_kwargs)
+        with self.assertRaises(ValueError):
+            translate_to_obs_request(prop_nan, "TestScene", 1)
+
+        # Crop exceeding source width
+        prop_excess_w = OBSProposal(obs_crop={"left": 2000, "top": 0, "right": 2000, "bottom": 0}, **base_kwargs)
+        with self.assertRaises(ValueError):
+            translate_to_obs_request(prop_excess_w, "TestScene", 1, source_width=3840, source_height=2160)
+
+        # Crop exceeding source height
+        prop_excess_h = OBSProposal(obs_crop={"left": 0, "top": 1200, "right": 0, "bottom": 1200}, **base_kwargs)
+        with self.assertRaises(ValueError):
+            translate_to_obs_request(prop_excess_h, "TestScene", 1, source_width=3840, source_height=2160)
+
+    def test_invalid_canvas_and_source_dimensions_rejected(self):
+        """translate_to_obs_request must reject zero, negative, or non-finite canvas/source dims."""
+        proposal = OBSProposal(
+            schema_version="1.0",
+            timestamp_utc="2026-11-09T22:00:00Z",
+            monotonic_seconds=1000.0,
+            mode="live",
+            camera_action="track_face",
+            tracking_state="tracking",
+            subject_lost=False,
+            source_resolution={"width": 3840, "height": 2160},
+            obs_crop={"left": 100, "top": 100, "right": 100, "bottom": 100},
+            framing={},
+            events=[],
+        )
+        with self.assertRaises(ValueError):
+            translate_to_obs_request(proposal, "TestScene", 1, canvas_width=0)
+        with self.assertRaises(ValueError):
+            translate_to_obs_request(proposal, "TestScene", 1, canvas_height=-1080)
+        with self.assertRaises(ValueError):
+            translate_to_obs_request(proposal, "TestScene", 1, source_width=float("inf"))
+
+
 
 if __name__ == "__main__":
     unittest.main()

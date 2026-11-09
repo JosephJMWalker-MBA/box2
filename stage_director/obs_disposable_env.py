@@ -39,24 +39,34 @@ def setup_disposable_obs_environment(
     base_dir: Optional[str] = None,
     synthetic_image_path: Optional[str] = None,
     overwrite: bool = False,
-    allow_production_root: bool = False,
 ) -> Dict[str, str]:
     """Create isolated disposable OBS profile and scene collection files.
 
     Guarantees:
-      - Defaults to a dedicated isolated root (~/.box2_obs_isolated_test), never production.
-      - Refuses to write into production OBS directory unless allow_production_root=True.
-      - Safeguards existing test files from accidental overwrite unless overwrite=True.
+      - Defaults to a dedicated isolated root (~/.box2_obs_isolated_test), anchored outside production.
+      - Refuses to write into production OBS directory or any of its subdirectories/descendants.
+      - Resolves symlinks via os.path.realpath to prevent escape.
+      - Fails before any directory creation or writes if either test file exists unless overwrite=True.
     """
     obs_dir = base_dir or get_isolated_obs_config_dir()
 
-    # Safety guard: Prevent accidental collision with production OBS directory
-    target_abs = os.path.abspath(obs_dir)
-    prod_abs = os.path.abspath(get_production_obs_config_dir())
-    if target_abs == prod_abs and not allow_production_root:
+    # Safety guard: Prevent accidental collision with production OBS directory or any descendant
+    target_real = os.path.realpath(os.path.abspath(obs_dir))
+    prod_real = os.path.realpath(os.path.abspath(get_production_obs_config_dir()))
+
+    is_in_production = False
+    try:
+        common = os.path.commonpath([target_real, prod_real])
+        if common == prod_real:
+            is_in_production = True
+    except ValueError:
+        is_in_production = False
+
+    if is_in_production:
         raise RuntimeError(
             f"Isolation safety violation: Refusing to create test artifacts in live production "
-            f"OBS configuration directory ({prod_abs}). Use an isolated test root."
+            f"OBS configuration directory tree ({prod_real}). Target: {target_real}. "
+            f"Use a path anchored outside the entire production OBS tree."
         )
 
     profiles_dir = os.path.join(obs_dir, "basic", "profiles", DISPOSABLE_PROFILE_NAME)
@@ -65,14 +75,13 @@ def setup_disposable_obs_environment(
     profile_ini_path = os.path.join(profiles_dir, "basic.ini")
     scene_json_path = os.path.join(scenes_dir, f"{DISPOSABLE_SCENE_COLLECTION_NAME}.json")
 
-    # Safeguard against accidental overwrite
-    if not overwrite and os.path.exists(profile_ini_path) and os.path.exists(scene_json_path):
-        return {
-            "profile_dir": profiles_dir,
-            "profile_ini": profile_ini_path,
-            "scene_json": scene_json_path,
-            "status": "already_exists",
-        }
+    # Safeguard against accidental overwrite: fail before writing if either exists
+    if not overwrite:
+        existing = [p for p in (profile_ini_path, scene_json_path) if os.path.exists(p)]
+        if existing:
+            raise FileExistsError(
+                f"Refusing to overwrite existing disposable OBS test files when overwrite=False: {existing}"
+            )
 
     os.makedirs(profiles_dir, exist_ok=True)
     os.makedirs(scenes_dir, exist_ok=True)

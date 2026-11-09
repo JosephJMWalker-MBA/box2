@@ -232,39 +232,50 @@ Tested three OBS transform strategies rendering the 4K source onto a broadcast 1
   python3 -m stage_director.simulate_framing
   ```
 
-## Milestone 5: Jetson Orin Nano 8GB Feasibility Benchmark & Code Corrections
+## Milestone 5: Jetson Orin Nano 8GB Feasibility Benchmark & Code Hardening
 
-Addressed the two Milestone 4 review corrections and executed the empirical Jetson Orin Nano 8GB hardware benchmark:
+Addressed all Milestone 4 review findings, implemented safety regressions with negative tests, and executed an empirical hardware benchmark on the physical Jetson Orin Nano [Edge Device / Jetson Orin Nano 8GB]:
 
-### 1. Milestone 4 Corrections Completed
-- **Transform Defaults**: Updated `translate_to_obs_request()` in `stage_director/obs_transform.py` so that `strategy="bounds_inner"` is the active default. Crop proposals now default to clean `scale = (1.0, 1.0)` with `boundsType="OBS_BOUNDS_SCALE_INNER"`, matching the recommended findings and avoiding double-scaling.
-- **Strict OBS Isolation & Protection**:
-  - `stage_director/obs_disposable_env.py` now defaults to a completely separate configuration root (`~/.box2_obs_isolated_test`), never touching the production OBS directory.
-  - Added safety guard rejecting any attempt to write into the live production OBS directory unless explicitly overridden.
-  - Added `overwrite=False` safeguard against accidental test file overwriting.
-  - Production `Diag.json`, `Untitled.json`, and `user.ini` remain verified 100% clean and untouched.
+### 1. Safety Regressions & Negative Tests Completed
+- **Strict OBS Isolation & Symlink Protection (`obs_disposable_env.py`)**:
+  - The production-root guard resolves paths using `os.path.realpath()` and compares against the production directory tree using `os.path.commonpath()`. Refuses to write into the production root or any of its subdirectories/descendants, including symlink escapes.
+  - Removed the `allow_production_root` escape hatch; test paths must be strictly anchored outside the production OBS tree.
+  - Added overwrite safeguard: if *either* `profile_ini_path` or `scene_json_path` exists when `overwrite=False`, raises `FileExistsError` before touching any files.
+- **OBS Transform Validation (`obs_transform.py`)**:
+  - Validates `strategy` against `VALID_STRATEGIES = {"bounds_inner", "explicit_scale", "combined"}`; raises `ValueError` on unknown strategies (no silent fallback).
+  - Validates canvas dimensions, source dimensions, and crop values; raises `ValueError` on negative, non-finite (`NaN`/`inf`), or out-of-bounds crops.
+  - Maintained `bounds_inner` as the default strategy.
+- **Test Suite**: 72 automated unit and regression tests pass in 0.29s (`python3 -m unittest discover -s stage_director/tests -v`).
 
-### 2. Jetson Orin Nano 8GB Empirical Benchmark Results
-Full report documented in [`docs/JETSON_BENCHMARK_REPORT.md`](JETSON_BENCHMARK_REPORT.md) and benchmark script at `tools/jetson/benchmark_jetson_encoding.py`:
+### 2. Live Baseline Audit: Existing `box2-stream.py` Service
+A non-invasive read-only audit of the running service on the Jetson Orin Nano revealed:
+- **Architecture**: `box2-stream.py` ingests an HTTP-FLV sub-stream from the NVR and runs FFmpeg with `-c:v copy -c:a aac` to Twitch.
+- **Nature**: Pure **passthrough / remux** of the camera's 640×360 sub-stream at 10.01 FPS. It does **not** decode or encode video on the Jetson.
+- **Resource Footprint**: Consumes ~1.1% of total system CPU and ~70 MB RSS. Uptime > 40 hours.
+- **Safety**: Benchmarking in parallel leaves ~98.9% CPU capacity and ~4.6 GB RAM available, avoiding interference with the running stream.
+
+### 3. Jetson Orin Nano 8GB Empirical Benchmark Results
+Full report documented in [`docs/JETSON_BENCHMARK_REPORT.md`](JETSON_BENCHMARK_REPORT.md) and benchmark scripts at `tools/jetson/jetson_pipeline_test.py` and `tools/jetson/benchmark_jetson_encoding.py`:
 
 - **Hardware & Environment**:
-  - NVIDIA Jetson Orin Nano Developer Kit Super (8GB) running L4T R39.2.1 (JetPack 6.x) on Ubuntu 24.04.4 LTS (Linux 6.8.12-1021-tegra, aarch64).
+  - NVIDIA Jetson Orin Nano Developer Kit Super (8GB) running L4T R39.2.1 (**JetPack 7.2.1**) on Ubuntu 24.04.4 LTS (Linux 6.8.12-1021-tegra, aarch64).
   - 6-core ARM Cortex-A78AE CPU @ up to 1.728 GHz in 25W MAXN power mode.
-  - CUDA 13.2 (V13.2.86), TensorRT 10.16.2.10, OpenCV 4.8.0, FFmpeg 8.0.1, GStreamer 1.24.2.
-- **Stage Director Portable Math Overhead**:
-  - Executed 1,800 consecutive synthetic framing updates (60.0s equivalent @ 30 FPS).
-  - Frame latency: **1.18 microseconds (µs) per frame** (throughput: **845,577 FPS**).
-  - Consumes only **0.0035%** of the 33.3ms frame budget.
-- **1080p30 H.264 Software Encoding Performance**:
-  - Real-time paced (`-re`) at 4500 kbps across 20-second benchmarks:
-    - **`ultrafast`**: **31.0 FPS sustained** (1.02× speed, 0 dropped frames, peak 47.1°C).
-    - **`veryfast`**: **31.0 FPS sustained** (1.02× speed, 0 dropped frames, peak 47.5°C).
-    - **`faster`**: **31.0 FPS sustained** (1.02× speed, 0 dropped frames, peak 48.0°C).
-  - Unconstrained throughput: **60.0 FPS** (2.0× real-time) at `veryfast`, **70.0 FPS** (2.33× real-time) at `ultrafast`.
-- **Thermals & Throttling**:
-  - Peak temperature under continuous 1080p30 load reached only **47.5°C** (thermal rise: +0.9°C).
-  - **Zero throttling observed**; CPU core frequencies remained steady at governor target.
-- **Conclusion**: The Jetson Orin Nano 8GB can reliably execute the full intelligent video broadcast pipeline (hardware RTSP decode via NVDEC, Stage Director Python framing, hardware scaling via NVMM/VIC, and software encoding via `libx264 veryfast`) autonomously without the Mac host.
+  - Silicon Capabilities: NVDEC hardware decoder present; **no NVENC in silicon** (software H.264 encode required).
+- **Stage Director Real Python Engine Latency**:
+  - Executed 1,800 frames of real `StageFramingAdapter` + `PerformerTracker` + `FramingEngine` + `OBSProposal` logic.
+  - Latency: **111.6 µs per frame** (throughput: **8,960.3 FPS**).
+  - Consumes only **0.33%** of the 33.3 ms frame budget.
+- **Edge Face Detection Cost Across Resolutions**:
+  - Native 4K (3840×2160): **497.6 ms** (2.0 FPS) — CPU 4K detection is unviable.
+  - 1080p (1920×1080): **138.9 ms** (7.2 FPS) — CPU 1080p detection is unviable.
+  - Sub-stream (640×360): **25.9 ms** (38.7 FPS) — **Real-time viable**.
+  - Architectural rule: Face detection must run on the camera's 640×360 sub-stream or asynchronously via TensorRT/GPU, while Stage Director tracking interpolates at 30 FPS.
+- **Continuous Synthetic AV Pipeline Performance**:
+  - Complete GStreamer pipeline (Source 4K H.264 -> NVDEC `nvv4l2decoder` -> NVMM `nvvidconv compute-hw=1` dynamic crop/resize -> NVMM-to-CPU transfer -> `x264enc veryfast` @ 4500k -> 48kHz AAC mux -> local sink).
+  - Sustained **42.7 FPS (1.42× real-time headroom)** with 0 dropped frames.
+  - Thermal rise: **-0.6°C** (peaking at **49.2°C**, 35°C below throttle threshold).
+  - Impact on live `box2-stream.py`: **Zero**. Stream continued uninterrupted.
+- **Overall Assessment**: **CONDITIONAL PASS** for 1080p30 autonomous broadcast on a single Jetson Orin Nano, subject to live camera RTSP network jitter and booking snapshot synchronization tests.
 
 ## Integration steps only after read-only audits
 

@@ -7,7 +7,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import math
 from typing import Any, Dict, List, Optional
+
+VALID_STRATEGIES = frozenset({"bounds_inner", "explicit_scale", "combined"})
 
 
 @dataclass(frozen=True)
@@ -76,11 +79,20 @@ def translate_to_obs_request(
 
     Returns None when proposal recommends capture_off.
     """
+    if strategy not in VALID_STRATEGIES:
+        raise ValueError(f"Invalid strategy '{strategy}'. Must be one of {sorted(VALID_STRATEGIES)}")
+
     if proposal.camera_action == "capture_off":
         return None
 
+    if not math.isfinite(canvas_width) or not math.isfinite(canvas_height) or canvas_width <= 0 or canvas_height <= 0:
+        raise ValueError(f"Invalid canvas dimensions: {canvas_width}x{canvas_height}. Must be finite positive values.")
+
     src_w = float(source_width or proposal.source_resolution.get("width", canvas_width))
     src_h = float(source_height or proposal.source_resolution.get("height", canvas_height))
+
+    if not math.isfinite(src_w) or not math.isfinite(src_h) or src_w <= 0 or src_h <= 0:
+        raise ValueError(f"Invalid source dimensions: {src_w}x{src_h}. Must be finite positive values.")
 
     if proposal.camera_action == "stage_wide" or proposal.obs_crop is None:
         crop_left = 0
@@ -90,13 +102,30 @@ def translate_to_obs_request(
         visible_w = src_w
         visible_h = src_h
     else:
-        # track_face with active crop
-        crop_left = proposal.obs_crop.get("left", 0)
-        crop_top = proposal.obs_crop.get("top", 0)
-        crop_right = proposal.obs_crop.get("right", 0)
-        crop_bottom = proposal.obs_crop.get("bottom", 0)
-        visible_w = max(1.0, src_w - crop_left - crop_right)
-        visible_h = max(1.0, src_h - crop_top - crop_bottom)
+        # Validate crop parameters
+        for k in ("left", "top", "right", "bottom"):
+            val = proposal.obs_crop.get(k)
+            if val is None or not isinstance(val, (int, float)) or not math.isfinite(val) or val < 0:
+                raise ValueError(f"Invalid crop dimension '{k}': {val}. Must be a finite non-negative number.")
+
+        crop_left = int(proposal.obs_crop.get("left", 0))
+        crop_top = int(proposal.obs_crop.get("top", 0))
+        crop_right = int(proposal.obs_crop.get("right", 0))
+        crop_bottom = int(proposal.obs_crop.get("bottom", 0))
+
+        if crop_left + crop_right >= src_w:
+            raise ValueError(
+                f"Horizontal crops ({crop_left} + {crop_right} = {crop_left + crop_right}) "
+                f"equal or exceed source width ({src_w})"
+            )
+        if crop_top + crop_bottom >= src_h:
+            raise ValueError(
+                f"Vertical crops ({crop_top} + {crop_bottom} = {crop_top + crop_bottom}) "
+                f"equal or exceed source height ({src_h})"
+            )
+
+        visible_w = src_w - crop_left - crop_right
+        visible_h = src_h - crop_top - crop_bottom
 
     if strategy == "bounds_inner":
         # Strategy (a): OBS_BOUNDS_SCALE_INNER with crop only; scale is 1.0

@@ -115,6 +115,66 @@ class DisposableOBSEnvironmentTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 setup_disposable_obs_environment(base_dir=get_production_obs_config_dir())
 
+            # Verify safety guard blocks writing to subdirectories of production root
+            with self.assertRaises(RuntimeError):
+                setup_disposable_obs_environment(
+                    base_dir=os.path.join(get_production_obs_config_dir(), "basic", "scenes")
+                )
+
+    def test_production_symlink_escape_blocked(self):
+        """Symlinks pointing into production OBS directories must be rejected by realpath guard."""
+        from stage_director.obs_disposable_env import get_production_obs_config_dir
+        with tempfile.TemporaryDirectory() as temp_dir:
+            symlink_to_prod = os.path.join(temp_dir, "fake_obs_link")
+            try:
+                os.symlink(get_production_obs_config_dir(), symlink_to_prod)
+            except (OSError, NotImplementedError):
+                self.skipTest("Symlinks not supported in this environment")
+
+            with self.assertRaises(RuntimeError):
+                setup_disposable_obs_environment(base_dir=symlink_to_prod)
+
+    def test_overwrite_safeguard_fails_if_either_target_exists(self):
+        """setup_disposable_obs_environment must fail before writes if either test file exists when overwrite=False."""
+        from stage_director.obs_disposable_env import (
+            DISPOSABLE_PROFILE_NAME,
+            DISPOSABLE_SCENE_COLLECTION_NAME,
+        )
+
+        with tempfile.TemporaryDirectory() as test_dir:
+            profiles_dir = os.path.join(test_dir, "basic", "profiles", DISPOSABLE_PROFILE_NAME)
+            scenes_dir = os.path.join(test_dir, "basic", "scenes")
+            profile_ini_path = os.path.join(profiles_dir, "basic.ini")
+            scene_json_path = os.path.join(scenes_dir, f"{DISPOSABLE_SCENE_COLLECTION_NAME}.json")
+
+            # Case 1: Only profile_ini exists
+            os.makedirs(profiles_dir, exist_ok=True)
+            with open(profile_ini_path, "w") as f:
+                f.write("existing profile content")
+
+            with self.assertRaises(FileExistsError):
+                setup_disposable_obs_environment(base_dir=test_dir, overwrite=False)
+            # Verify scene_json was NOT written
+            self.assertFalse(os.path.exists(scene_json_path))
+
+            # Case 2: Only scene_json exists
+            os.remove(profile_ini_path)
+            os.makedirs(scenes_dir, exist_ok=True)
+            with open(scene_json_path, "w") as f:
+                f.write("{}")
+
+            with self.assertRaises(FileExistsError):
+                setup_disposable_obs_environment(base_dir=test_dir, overwrite=False)
+            # Verify profile_ini was NOT written
+            self.assertFalse(os.path.exists(profile_ini_path))
+
+            # Case 3: Overwrite=True succeeds and replaces both
+            paths = setup_disposable_obs_environment(base_dir=test_dir, overwrite=True)
+            self.assertTrue(os.path.exists(paths["profile_ini"]))
+            self.assertTrue(os.path.exists(paths["scene_json"]))
+            with open(paths["profile_ini"], "r") as f:
+                self.assertIn("[General]", f.read())
+
 
 if __name__ == "__main__":
     unittest.main()
