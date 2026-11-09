@@ -36,6 +36,49 @@ The simulator prints proposed decisions for a **synthetic 10-minute set**. The s
 
 > In `JosephJMWalker-MBA/box2`, use the `feature/stage-director-antigravity-kickoff` branch and read `AGENTS.md`, `docs/ANTIGRAVITY_STAGE_DIRECTOR.md`, and issue #8. Run the existing unit suite and simulator first. Keep all real endpoints unconfigured. Build a **local, consented-video-only face bounding-box simulator** behind an isolated adapter: camera feed input is an explicitly provided local sample/video, not a discovered RTSP address or live camera. Use stage polygon, one manually selected/confirmed performer, subject-loss timeout, dead-zone and smoothing to generate **OBS crop/transform proposals as JSON only**. Include deterministic unit tests using synthetic bounding-box sequences (no real face images required) covering fast movement, offstage bystanders, missing face, subject switch, sudden zoom, privacy revoke and process restart. No face recognition or storage. Do not install heavyweight dependencies or touch camera/PTZ, OBS WebSocket, Twitch, NVR, hosting, booking DB, or speaker without a separate explicit integration approval. Document the exact test commands and evidence. Make a reviewable incremental commit/PR rather than changing production.
 
+## Completed milestone: Offline face bounding-box tracking and OBS crop prototype
+
+Status: **Implemented, offline tested, zero live hardware or network connection**.
+
+### Implemented modules (Pure Python standard library)
+
+1. `stage_director/geometry.py`:
+   - `BoundingBox`: Bounding box properties, center, area, IoU, and Euclidean distance.
+   - `StagePolygon`: 2D stage polygon boundary with ray-casting point/box containment. Detections outside the stage polygon are treated as offstage bystanders and discarded.
+2. `stage_director/framing.py`:
+   - `FramingEngine` & `FramingWindow`: 16:9 medium-shot target crop calculation (face at ~33% headroom, torso/mic visible in lower 67%).
+   - `deadzone_x_px`, `deadzone_y_px`, `deadzone_zoom_px`: Suppresses micro-twitches and camera jitter.
+   - Velocity capping (`max_pan_speed_px_s`, `max_tilt_speed_px_s`, `max_zoom_speed_px_s`) and exponential smoothing (`smoothing_tau = 0.25s`).
+   - Zoom boundaries strictly clamped between 1.0x (full frame) and 2.4x.
+3. `stage_director/tracking.py`:
+   - `PerformerTracker`: Single primary stage performer tracking via spatial continuity (NO biometric identity recognition, embeddings, or enrollment).
+   - Stage polygon filtering: Offstage audience/bystanders are ignored.
+   - Hold timeout (`loss_hold_seconds = 2.0s`): Brief head turns or mic occlusions hold framing steady. Prolonged absence transitions to `lost` and falls back to safe wide with `camera_subject_lost`.
+   - Reacquisition: Returning performer is seamlessly re-locked.
+   - Manual confirmation and subject switching support.
+4. `stage_director/obs_transform.py`:
+   - `OBSProposal`: Structured JSON schema for OBS crop proposals (`crop_left`, `crop_top`, `crop_right`, `crop_bottom`), framing metadata, tracking state, cues, and events.
+5. `stage_director/adapter.py`:
+   - `StageFramingAdapter`: Integrates `StageDirector` privacy and clock authorization with performer tracking and framing.
+   - Fail-closed: `capture_off` when unconsented, stopped, or private; full frame when armed/finished; active medium shot crop only when live and tracked.
+6. `stage_director/simulate_framing.py`:
+   - End-to-end synthetic performance simulator walking through arrival, tracking, pacing, bystander filtering, brief occlusion hold, fast sprint speed capping, prop fetch safe-wide fallback, reacquisition, and time cues.
+
+### Verification evidence
+
+Run all 51 tests:
+```bash
+python3 -m unittest discover -s stage_director/tests -v
+```
+Result: 51 tests passed in 0.003s.
+
+Run synthetic framing simulator:
+```bash
+python3 -m stage_director.simulate --framing
+# or
+python3 -m stage_director.simulate_framing
+```
+
 ## Integration steps only after read-only audits
 
 1. Verify installed Reolink firmware/control support, whether direct camera vs NVR RTSP is used, and PTZ limits; first test physical PTZ offline.
