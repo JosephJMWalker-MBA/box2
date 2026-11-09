@@ -1,5 +1,7 @@
 """Automated unit and regression tests for Milestone 4: Visual Framing and OBS Transform Strategies."""
+import json
 import os
+import tempfile
 import unittest
 
 try:
@@ -86,12 +88,25 @@ class VisualFramingTests(unittest.TestCase):
 class DisposableOBSEnvironmentTests(unittest.TestCase):
     def test_disposable_obs_environment_isolation(self):
         """Disposable profile/collection creation must never modify live production Diag.json."""
-        paths = setup_disposable_obs_environment()
-        self.assertTrue(os.path.exists(paths["profile_ini"]))
-        self.assertTrue(os.path.exists(paths["scene_json"]))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Seed mock production Diag.json
+            mock_scenes = os.path.join(tmpdir, "basic", "scenes")
+            os.makedirs(mock_scenes, exist_ok=True)
+            mock_diag = os.path.join(mock_scenes, "Diag.json")
+            with open(mock_diag, "w", encoding="utf-8") as f:
+                json.dump({"name": "Diag", "sources": []}, f)
 
-        ok, issues = verify_production_isolation()
-        self.assertTrue(ok, f"Production isolation violated: {issues}")
+            paths = setup_disposable_obs_environment(base_dir=tmpdir)
+            self.assertTrue(os.path.exists(paths["profile_ini"]))
+            self.assertTrue(os.path.exists(paths["scene_json"]))
+
+            ok, issues = verify_production_isolation(obs_dir=tmpdir)
+            self.assertTrue(ok, f"Production isolation violated: {issues}")
+
+            # Verify Diag.json was not modified
+            with open(mock_diag, "r", encoding="utf-8") as f:
+                d = json.load(f)
+                self.assertEqual(d["name"], "Diag")
 
 
 if __name__ == "__main__":

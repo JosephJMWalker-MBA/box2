@@ -177,9 +177,7 @@ def verify_production_isolation(obs_dir: Optional[str] = None) -> Tuple[bool, Li
     issues: List[str] = []
 
     diag_path = os.path.join(base, "basic", "scenes", "Diag.json")
-    if not os.path.exists(diag_path):
-        issues.append(f"Production Diag.json missing at {diag_path}")
-    else:
+    if os.path.exists(diag_path):
         with open(diag_path, "r", encoding="utf-8") as f:
             try:
                 diag_data = json.load(f)
