@@ -85,6 +85,80 @@ class TrackingHardeningTests(unittest.TestCase):
         self.assertIn(res.state, (TrackingState.AMBIGUOUS, TrackingState.LOST))
         self.assertNotEqual(res.active_subject, stranger_b)
 
+    def test_near_position_reacquisition_after_extended_loss_requires_confirmation(self):
+        """Person appearing in performer's previous position after extended loss must NOT auto-acquire."""
+        self.tracker.enable()
+        perf_a = BoundingBox(x=1800.0, y=800.0, width=120.0, height=150.0)
+        self.tracker.update([perf_a], monotonic_seconds=10.0)
+
+        # 3 seconds of no detections (>2s loss hold limit)
+        self.tracker.update([], monotonic_seconds=13.0)
+        self.assertEqual(self.tracker.state, TrackingState.LOST)
+
+        # Person B steps directly into A's former position with matching size
+        person_b = BoundingBox(x=1800.0, y=800.0, width=120.0, height=150.0)
+        res = self.tracker.update([person_b], monotonic_seconds=13.5)
+
+        # Proximity is NOT proof of identity after extended loss; must require host confirmation
+        self.assertEqual(res.state, TrackingState.AMBIGUOUS)
+        self.assertIsNone(res.active_subject)
+        self.assertIn("performer_confirmation_required", res.events)
+
+        # Explicit host confirmation then locks and tracks person B
+        confirmed = self.tracker.confirm_subject(person_b, monotonic_seconds=14.0)
+        self.assertTrue(confirmed)
+        self.assertEqual(self.tracker.active_subject, person_b)
+        self.assertEqual(self.tracker.state, TrackingState.TRACKING)
+
+    def test_multiple_onstage_faces_initial_acquisition_is_ambiguous(self):
+        """When multiple faces appear onstage on initial frame, do NOT pick largest; require confirmation."""
+        self.tracker.enable()
+        face_a = BoundingBox(x=1800.0, y=800.0, width=120.0, height=150.0)
+        face_b = BoundingBox(x=2400.0, y=800.0, width=140.0, height=170.0)  # Larger face
+
+        # Initial frame with two candidates
+        res = self.tracker.update([face_a, face_b], monotonic_seconds=10.0)
+
+        # Ambiguous! Must NOT auto-acquire face_b simply because it's larger
+        self.assertEqual(res.state, TrackingState.AMBIGUOUS)
+        self.assertIsNone(res.active_subject)
+        self.assertIn("performer_confirmation_required", res.events)
+
+        # Host explicitly selects face_a
+        self.tracker.confirm_subject(face_a, monotonic_seconds=10.5)
+        self.assertEqual(self.tracker.active_subject, face_a)
+        self.assertEqual(self.tracker.state, TrackingState.TRACKING)
+
+    def test_adapter_confirm_and_switch_rejected_when_not_live(self):
+        """Adapter confirm_subject and switch_subject must fail closed unless LIVE."""
+        adapter = StageFramingAdapter()
+        face = BoundingBox(x=1800.0, y=800.0, width=120.0, height=150.0)
+
+        # In OFF mode
+        self.assertFalse(adapter.confirm_subject(face, 10.0))
+        self.assertFalse(adapter.switch_subject(face, 10.0))
+        self.assertEqual(adapter.tracker.state, TrackingState.DISABLED)
+
+        # In ARMED mode
+        now = datetime(2026, 11, 9, 22, 0, tzinfo=timezone.utc)
+        booking = BookingSnapshot(
+            booking_id="test-booking", revision=1,
+            slot_start_utc=now, slot_end_utc=now + timedelta(minutes=10),
+            issued_at_utc=now - timedelta(seconds=10),
+            expires_at_utc=now + timedelta(minutes=11),
+            stage_seconds=600, privacy_class="public", checked_in=True,
+            live_consent=True, tracking_consent=True, capture_verified=True,
+        )
+        adapter.arm(booking, now)
+        self.assertFalse(adapter.confirm_subject(face, 10.0))
+        self.assertFalse(adapter.switch_subject(face, 10.0))
+        self.assertEqual(adapter.tracker.state, TrackingState.DISABLED)
+
+        # Now start set (LIVE mode)
+        adapter.start_set(now, 100.0, host_confirmed=True)
+        self.assertTrue(adapter.confirm_subject(face, 100.0))
+        self.assertEqual(adapter.tracker.state, TrackingState.TRACKING)
+
 
 class FramingHardeningTests(unittest.TestCase):
     def setUp(self):

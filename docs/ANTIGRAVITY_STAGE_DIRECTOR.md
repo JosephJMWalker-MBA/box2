@@ -102,6 +102,47 @@ Addressed all three P1 review findings using failing regression tests first:
    - Implemented `create_transform_backup()` and `restore_transform_request()` for clean operator rollback.
    - Standalone `obs_request_fixture.py` validates outgoing request shape, integer crop constraints, and 16:9 aspect ratio at wide, medium, and boundary positions with zero network dependencies.
 
+## Milestone 3: Subject Safety and Read-Only Hardware Discovery (PR #9 Second Review)
+
+Addressed tracking safety edge cases with failing regression tests first, followed by a non-invasive, read-only audit of the local production environment:
+
+### 1. Subject Safety Hardening (`tracking.py`, `adapter.py`)
+- **Near-Position Reacquisition Safety**: Proximity alone does not prove identity after an extended loss (>2.0s). If the performer steps offstage and another person appears near or in the performer's last recorded position, the tracker rejects automatic reacquisition and transitions to `TrackingState.AMBIGUOUS` with a `performer_confirmation_required` event, keeping the camera smoothly framed safe-wide until host confirmation.
+- **Ambiguous Initial Acquisition**: If two or more faces appear onstage at set start, the tracker refuses to auto-select the largest face. It enters `TrackingState.AMBIGUOUS` requiring operator confirmation or subject selection.
+- **Adapter Authorization Gating**: `StageFramingAdapter.confirm_subject()` and `switch_subject()` fail closed (`return False`) unless the director is in authorized `Mode.LIVE`.
+- **Preserved Test Coverage**: 63 unit tests pass in 0.013s (`stage_director/tests/test_hardening.py`, `test_adapter.py`, `test_tracking.py`).
+
+### 2. Sanitized Read-Only Hardware & OBS Environment Audit
+*All credentials, internal IPs, and private data are redacted.*
+
+- **Host & Architecture**:
+  - Model: Apple Mac (Apple Silicon M4, 10 cores, 16 GB unified RAM).
+  - OS: macOS 26.6.2 (Darwin Kernel 25.6.0).
+  - Process Placement: Local Mac runs OBS Studio and a background watchdog script (`obs_sck_watchdog.py`) ensuring host microphone muting on startup. Edge vision detection / Jetson Orin operates on LAN; no vision inferencing processes run on Mac host.
+- **OBS Studio Setup**:
+  - Application: OBS Studio 32.2.2 (64-bit mac).
+  - Canvas & Profiles: Profile `basic.ini` sets Base Canvas at 1920x1080 (16:9) and Output at 1920x1080 @ 30 FPS.
+  - Audio Topology: Audio monitoring device configured to `BlackHole 16ch` (`BlackHole16ch_UID`) at 48 kHz stereo.
+- **OBS WebSocket Server**:
+  - Version: 5.7.4 (RPC Version 1 protocol).
+  - Bind: Port 4455.
+  - Security: Authentication enabled (`auth_required: True`), password configured.
+- **Scene Inventory & Transform Configuration (`Diag.json` active profile)**:
+  - Active Scene: `Reolink Direct RTSP`.
+  - Video Source: `Stage Camera (Direct RTSP)` (`ffmpeg_source`, ID 1):
+    - Configured properties: `bounds_type: 2` (`OBS_BOUNDS_SCALE_INNER`), `bounds: {x: 1920.0, y: 1080.0}`, alignment: 5 (Top-Left), `pos: {0, 0}`, `scale: {1.0, 1.0}`, `crop: {0, 0, 0, 0}`.
+    - Options: `rtsp_transport=tcp allowed_media_types=video fflags=nobuffer flags=low_delay use_wallclock_as_timestamps=1`.
+    - Verification: OBS native inner bounds (`OBS_BOUNDS_SCALE_INNER`) automatically scales inner 16:9 crop boxes to fit the 1920x1080 canvas without manual pixel scaling distortion.
+  - Audio Source: `Reolink Stage Mic (RTSP)` (`ffmpeg_source`, ID 10) configured with low-delay RTSP transport.
+  - Secondary scenes on host: `Scene`, `TWITCH REPLAY`, `Box2 Live`, `Security Cams`, `Video Presentation Loop`, `Chess Arena`.
+- **Camera & NVR Topology**:
+  - Reolink RLC-823A camera delivers low-delay RTSP directly to OBS over TCP.
+  - NVR recording is independently maintained on LAN; live OBS crop proposals do not alter camera PTZ firmware, NVR storage, or recording schedules.
+
+### 3. Readiness for Next Step
+- Automated tracking and OBS transform translation logic are hardened, verified by 63 passing unit tests and offline fixtures.
+- Ready for: **Isolated Prerecorded-Video Framing Test** (feeding an offline recorded performance video into an isolated test scene to evaluate visual framing, zoom speeds, and transition aesthetics before any live hardware control).
+
 ## Integration steps only after read-only audits
 
 1. Verify installed Reolink firmware/control support, whether direct camera vs NVR RTSP is used, and PTZ limits; first test physical PTZ offline.

@@ -129,12 +129,22 @@ class StageFramingAdapter:
         )
 
     def confirm_subject(self, box: Optional[BoundingBox] = None,
-                        monotonic_seconds: float = 0.0) -> None:
-        """Explicitly lock or confirm the stage performer."""
-        self.tracker.confirm_subject(box, monotonic_seconds)
+                        monotonic_seconds: float = 0.0) -> bool:
+        """Explicitly lock or confirm the stage performer.
+
+        Only permitted when an authorized LIVE set is active; fails closed otherwise.
+        """
+        if self.director.mode != Mode.LIVE:
+            return False
+        return self.tracker.confirm_subject(box, monotonic_seconds)
 
     def switch_subject(self, box: BoundingBox, monotonic_seconds: float) -> bool:
-        """Explicitly switch tracking to another onstage performer."""
+        """Explicitly switch tracking to another onstage performer.
+
+        Only permitted when an authorized LIVE set is active; fails closed otherwise.
+        """
+        if self.director.mode != Mode.LIVE:
+            return False
         return self.tracker.switch_subject(box, monotonic_seconds)
 
     def process_frame(self, detections: Sequence[BoundingBox],
@@ -180,7 +190,7 @@ class StageFramingAdapter:
             window = self.framing.update(track_res.active_subject, monotonic_seconds)
             subject_lost = False
         else:
-            # Face is lost or acquiring: smoothly transition towards safe wide
+            # Face is lost, ambiguous, or acquiring: smoothly transition towards safe wide
             window = self.framing.update(None, monotonic_seconds)
             subject_lost = (track_res.state == TrackingState.LOST)
 

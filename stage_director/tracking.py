@@ -41,7 +41,9 @@ class PerformerTracker:
       and area inconsistencies to prevent latching onto a bystander when performer vanishes.
     - Temporarily holds framing during brief occlusions / head turns.
     - Smoothly transitions to safe wide only after a subject-loss timeout.
-    - Policy for host-confirmed reacquisition after extended loss rather than silently following strangers.
+    - Disallows automatic reacquisition after extended loss (>2s); physical proximity is NOT
+      identity proof. Host confirmation is strictly required by default.
+    - Requires unambiguous candidate or explicit host selection during initial acquisition.
     """
 
     def __init__(self, stage_polygon: Optional[StagePolygon] = None,
@@ -50,7 +52,8 @@ class PerformerTracker:
                  base_match_radius_px: float = 400.0,
                  max_performer_speed_px_s: float = 1500.0,
                  max_area_ratio: float = 3.0,
-                 require_confirmation_after_loss: bool = True) -> None:
+                 require_confirmation_after_loss: bool = True,
+                 allow_proximity_reacquisition: bool = False) -> None:
         self.stage_polygon = stage_polygon or StagePolygon.default_stage()
         self.loss_hold_seconds = loss_hold_seconds
         self.min_confidence = min_confidence
@@ -58,6 +61,7 @@ class PerformerTracker:
         self.max_performer_speed_px_s = max_performer_speed_px_s
         self.max_area_ratio = max_area_ratio
         self.require_confirmation_after_loss = require_confirmation_after_loss
+        self.allow_proximity_reacquisition = allow_proximity_reacquisition
 
         self.state: TrackingState = TrackingState.DISABLED
         self.active_subject: Optional[BoundingBox] = None
@@ -65,7 +69,7 @@ class PerformerTracker:
         self._held_subject: Optional[BoundingBox] = None
 
     def enable(self) -> None:
-        """Enable tracking (transitions from DISABLED to ACQUIRING)."""
+        """Enable tracking (transitions from DISABLED/AMBIGUOUS to ACQUIRING)."""
         if self.state in (TrackingState.DISABLED, TrackingState.AMBIGUOUS):
             self.state = TrackingState.ACQUIRING
             self.active_subject = None
@@ -80,21 +84,33 @@ class PerformerTracker:
         self._last_seen_monotonic = None
 
     def confirm_subject(self, box: Optional[BoundingBox] = None,
-                        monotonic_seconds: float = 0.0) -> None:
-        """Operator explicitly confirms or locks the performer."""
-        if box is not None and self.stage_polygon.contains_box(box):
+                        monotonic_seconds: float = 0.0) -> bool:
+        """Operator explicitly confirms or locks the performer.
+
+        Returns True if performer was successfully confirmed or enabled.
+        """
+        if self.state == TrackingState.DISABLED:
+            return False
+
+        if box is not None:
+            if not self.stage_polygon.contains_box(box):
+                return False
             self.active_subject = box
             self._held_subject = box
             self._last_seen_monotonic = monotonic_seconds
             self.state = TrackingState.TRACKING
-        else:
-            self.enable()
+            return True
+
+        self.enable()
+        return True
 
     def switch_subject(self, box: BoundingBox, monotonic_seconds: float) -> bool:
         """Operator explicitly switches the tracked subject to a new performer.
 
         Returns True if the box is inside the stage polygon and switch succeeded.
         """
+        if self.state == TrackingState.DISABLED:
+            return False
         if not self.stage_polygon.contains_box(box):
             return False
         self.active_subject = box
@@ -146,7 +162,7 @@ class PerformerTracker:
 
         onstage_count = len(onstage_boxes)
 
-        # 2. Case A: Active performer is currently tracked (or holding)
+        # 2. Case A: Active performer is currently tracked (or holding within loss_hold_seconds)
         if self.active_subject is not None or self.state == TrackingState.HOLDING:
             anchor = self._held_subject or self.active_subject
             assert anchor is not None
@@ -205,12 +221,11 @@ class PerformerTracker:
 
         # 3. Case B: No active performer (state is ACQUIRING, LOST, or AMBIGUOUS)
         if onstage_boxes:
-            # If recovering after extended loss (>2s):
+            # Subcase B1: Recovering after extended loss (>2s)
             if self.state in (TrackingState.LOST, TrackingState.AMBIGUOUS):
                 if self.require_confirmation_after_loss:
-                    # Check if an onstage candidate plausibly matches last confirmed performer
-                    if self._held_subject is not None:
-                        # Allow wider reacquisition radius for returning performer
+                    # Optional proximity auto-reacquisition (off by default)
+                    if self.allow_proximity_reacquisition and self._held_subject is not None:
                         reacquire_radius = self.base_match_radius_px * 1.5
                         matches = [
                             b for b in onstage_boxes
@@ -231,8 +246,8 @@ class PerformerTracker:
                                 offstage_count=offstage_count,
                             )
 
-                    # Does not match last known performer or multiple people present:
-                    # Ambiguous! Require host confirmation rather than silently following a stranger
+                    # Default policy: Proximity is NOT proof of identity after extended loss.
+                    # Must require explicit host confirmation rather than silently tracking someone.
                     self.state = TrackingState.AMBIGUOUS
                     events.append("performer_confirmation_required")
                     return TrackingResult(
@@ -243,8 +258,22 @@ class PerformerTracker:
                         offstage_count=offstage_count,
                     )
 
-            # ACQUIRING at set start
-            chosen = max(onstage_boxes, key=lambda b: b.area)
+            # Subcase B2: Initial acquisition (state is ACQUIRING)
+            if len(onstage_boxes) > 1:
+                # Ambiguous initial state: multiple people on stage at start!
+                # Do NOT pick largest face; require host confirmation.
+                self.state = TrackingState.AMBIGUOUS
+                events.append("performer_confirmation_required")
+                return TrackingResult(
+                    state=TrackingState.AMBIGUOUS,
+                    active_subject=None,
+                    events=events,
+                    onstage_count=onstage_count,
+                    offstage_count=offstage_count,
+                )
+
+            # Exactly one unambiguous performer on stage
+            chosen = onstage_boxes[0]
             self.active_subject = chosen
             self._held_subject = chosen
             self._last_seen_monotonic = monotonic_seconds

@@ -86,15 +86,19 @@ def run_simulation() -> None:
         ]),
         (551.0, "comedian_away_holding_framing", []),
         (553.5, "subject_lost_smooth_fallback_to_safe_wide", []),
-        # 11. Comedian returns to stage
-        (560.0, "comedian_returns_reacquired", [
+        # 11. Comedian returns to stage: prolonged absence (>2s) enters AMBIGUOUS
+        (560.0, "comedian_returns_ambiguous_safety_check", [
             BoundingBox(x=1880.0, y=700.0, width=120.0, height=150.0)
         ]),
-        # 12. T-15s warning cue
+        # 12. Host explicitly confirms comedian: tracking resumes smoothly
+        (565.0, "host_confirms_comedian_tracking_resumed", [
+            BoundingBox(x=1880.0, y=700.0, width=120.0, height=150.0)
+        ]),
+        # 13. T-15s warning cue
         (586.0, "warn_15_cue_fired", [
             BoundingBox(x=1880.0, y=700.0, width=120.0, height=150.0)
         ]),
-        # 13. Set finishes at 600s
+        # 14. Set finishes at 600s
         (600.0, "time_up_cue_switches_to_stage_wide", [
             BoundingBox(x=1880.0, y=700.0, width=120.0, height=150.0)
         ]),
@@ -122,6 +126,10 @@ def run_simulation() -> None:
             continue
         current_time = start_time + timedelta(seconds=elapsed)
         current_mono = base_monotonic + elapsed
+
+        if label == "host_confirms_comedian_tracking_resumed" and detections:
+            adapter.confirm_subject(detections[0], current_mono)
+            print(f"[{current_time.strftime('%Y-%m-%dT%H:%M:%SZ')}] HOST ACTION: operator confirmed comedian on stage")
 
         proposal = adapter.process_frame(detections, current_time, current_mono)
         print(f"[{proposal.timestamp_utc}] STEP: {label} (elapsed: {elapsed}s)")
