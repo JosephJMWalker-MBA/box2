@@ -1,0 +1,29 @@
+name: Stage Director offline tests
+
+on:
+  pull_request:
+    paths:
+      - "stage_director/**"
+      - ".github/workflows/stage-director-tests.yml"
+  push:
+    branches:
+      - "feature/stage-director-antigravity-kickoff"
+    paths:
+      - "stage_director/**"
+      - ".github/workflows/stage-director-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Unit tests
+        run: python -m unittest discover -s stage_director/tests -v
+      - name: Deterministic synthetic simulation
+        run: python -m stage_director.simulate
