@@ -61,17 +61,17 @@ def translate_to_obs_request(
     proposal: OBSProposal,
     scene_name: str,
     scene_item_id: int,
-    canvas_width: int = 3840,
-    canvas_height: int = 2160,
+    canvas_width: int = 1920,
+    canvas_height: int = 1080,
     source_width: Optional[int] = None,
     source_height: Optional[int] = None,
-    strategy: str = "combined",
+    strategy: str = "bounds_inner",
 ) -> Optional[Dict[str, Any]]:
     """Translate an internal OBSProposal into an official OBS WebSocket v5 request.
 
     Supports three transform strategies:
-      - 'combined' (default): sets boundsType='OBS_BOUNDS_SCALE_INNER' with computed scale factors.
-      - 'bounds_inner': sets boundsType='OBS_BOUNDS_SCALE_INNER' with scale=(1.0, 1.0) and crop only.
+      - 'bounds_inner' (default): sets boundsType='OBS_BOUNDS_SCALE_INNER' with scale=(1.0, 1.0) and crop only.
+      - 'combined': sets boundsType='OBS_BOUNDS_SCALE_INNER' with computed scale factors.
       - 'explicit_scale': sets boundsType='OBS_BOUNDS_NONE' with explicit scaleX and scaleY.
 
     Returns None when proposal recommends capture_off.

@@ -52,9 +52,37 @@ class OBSTranslatorTests(unittest.TestCase):
         self.assertEqual(transform["boundsType"], "OBS_BOUNDS_SCALE_INNER")
         self.assertEqual(transform["boundsWidth"], 3840.0)
         self.assertEqual(transform["boundsHeight"], 2160.0)
-        # Scaled to fill output canvas
-        self.assertAlmostEqual(transform["scaleX"], 2.4, places=2)
-        self.assertAlmostEqual(transform["scaleY"], 2.4, places=2)
+        # Default strategy (bounds_inner) leaves scale at 1.0; OBS bounds handles scaling
+        self.assertEqual(transform["scaleX"], 1.0)
+        self.assertEqual(transform["scaleY"], 1.0)
+
+        # Combined strategy explicitly sets scale factors
+        req_comb = translate_to_obs_request(
+            proposal=proposal,
+            scene_name="PERFORMER LIVE",
+            scene_item_id=42,
+            canvas_width=3840,
+            canvas_height=2160,
+            strategy="combined",
+        )
+        assert req_comb is not None
+        trans_comb = req_comb["requestData"]["sceneItemTransform"]
+        self.assertAlmostEqual(trans_comb["scaleX"], 2.4, places=2)
+        self.assertAlmostEqual(trans_comb["scaleY"], 2.4, places=2)
+
+        # Explicit scale strategy sets OBS_BOUNDS_NONE
+        req_exp = translate_to_obs_request(
+            proposal=proposal,
+            scene_name="PERFORMER LIVE",
+            scene_item_id=42,
+            canvas_width=3840,
+            canvas_height=2160,
+            strategy="explicit_scale",
+        )
+        assert req_exp is not None
+        trans_exp = req_exp["requestData"]["sceneItemTransform"]
+        self.assertEqual(trans_exp["boundsType"], "OBS_BOUNDS_NONE")
+        self.assertAlmostEqual(trans_exp["scaleX"], 2.4, places=2)
 
     def test_backup_and_restore(self):
         """Transform backup and restore request creation."""

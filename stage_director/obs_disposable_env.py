@@ -18,21 +18,61 @@ from typing import Any, Dict, List, Optional, Tuple
 
 DISPOSABLE_PROFILE_NAME = "StageDirector_Test"
 DISPOSABLE_SCENE_COLLECTION_NAME = "StageDirector_Test"
+DEFAULT_ISOLATED_CONFIG_ROOT = os.path.expanduser("~/.box2_obs_isolated_test")
 
 
-def get_obs_config_dir() -> str:
-    """Return user's standard OBS Studio configuration directory."""
+def get_isolated_obs_config_dir() -> str:
+    """Return the dedicated, isolated OBS test configuration root directory.
+
+    Defaults to ~/.box2_obs_isolated_test, completely separate from production OBS.
+    Can be overridden via BOX2_OBS_CONFIG_ROOT environment variable.
+    """
+    return os.environ.get("BOX2_OBS_CONFIG_ROOT", DEFAULT_ISOLATED_CONFIG_ROOT)
+
+
+def get_production_obs_config_dir() -> str:
+    """Return the user's live production OBS Studio configuration directory (read-only)."""
     return os.path.expanduser("~/Library/Application Support/obs-studio")
 
 
 def setup_disposable_obs_environment(
     base_dir: Optional[str] = None,
     synthetic_image_path: Optional[str] = None,
+    overwrite: bool = False,
+    allow_production_root: bool = False,
 ) -> Dict[str, str]:
-    """Create isolated disposable OBS profile and scene collection files."""
-    obs_dir = base_dir or get_obs_config_dir()
+    """Create isolated disposable OBS profile and scene collection files.
+
+    Guarantees:
+      - Defaults to a dedicated isolated root (~/.box2_obs_isolated_test), never production.
+      - Refuses to write into production OBS directory unless allow_production_root=True.
+      - Safeguards existing test files from accidental overwrite unless overwrite=True.
+    """
+    obs_dir = base_dir or get_isolated_obs_config_dir()
+
+    # Safety guard: Prevent accidental collision with production OBS directory
+    target_abs = os.path.abspath(obs_dir)
+    prod_abs = os.path.abspath(get_production_obs_config_dir())
+    if target_abs == prod_abs and not allow_production_root:
+        raise RuntimeError(
+            f"Isolation safety violation: Refusing to create test artifacts in live production "
+            f"OBS configuration directory ({prod_abs}). Use an isolated test root."
+        )
+
     profiles_dir = os.path.join(obs_dir, "basic", "profiles", DISPOSABLE_PROFILE_NAME)
     scenes_dir = os.path.join(obs_dir, "basic", "scenes")
+
+    profile_ini_path = os.path.join(profiles_dir, "basic.ini")
+    scene_json_path = os.path.join(scenes_dir, f"{DISPOSABLE_SCENE_COLLECTION_NAME}.json")
+
+    # Safeguard against accidental overwrite
+    if not overwrite and os.path.exists(profile_ini_path) and os.path.exists(scene_json_path):
+        return {
+            "profile_dir": profiles_dir,
+            "profile_ini": profile_ini_path,
+            "scene_json": scene_json_path,
+            "status": "already_exists",
+        }
 
     os.makedirs(profiles_dir, exist_ok=True)
     os.makedirs(scenes_dir, exist_ok=True)
@@ -172,8 +212,9 @@ Mode=Simple
 
 
 def verify_production_isolation(obs_dir: Optional[str] = None) -> Tuple[bool, List[str]]:
-    """Verify that live production scene Diag.json and user.ini remain completely intact."""
-    base = obs_dir or get_obs_config_dir()
+    """Verify that live production scene Diag.json and user.ini remain completely intact,
+    and that no test artifacts leaked into the production directory."""
+    base = obs_dir or get_production_obs_config_dir()
     issues: List[str] = []
 
     diag_path = os.path.join(base, "basic", "scenes", "Diag.json")
@@ -192,6 +233,15 @@ def verify_production_isolation(obs_dir: Optional[str] = None) -> Tuple[bool, Li
             content = f.read()
             if "SceneCollection=StageDirector_Test" in content:
                 issues.append("user.ini was inadvertently pointed to test collection")
+
+    # Verify no test artifacts leaked into production directories
+    test_scene = os.path.join(base, "basic", "scenes", f"{DISPOSABLE_SCENE_COLLECTION_NAME}.json")
+    if os.path.exists(test_scene):
+        issues.append(f"Production directory contains test collection file: {test_scene}")
+
+    test_profile = os.path.join(base, "basic", "profiles", DISPOSABLE_PROFILE_NAME)
+    if os.path.exists(test_profile):
+        issues.append(f"Production directory contains test profile directory: {test_profile}")
 
     return len(issues) == 0, issues
 

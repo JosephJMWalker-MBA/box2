@@ -88,25 +88,32 @@ class VisualFramingTests(unittest.TestCase):
 class DisposableOBSEnvironmentTests(unittest.TestCase):
     def test_disposable_obs_environment_isolation(self):
         """Disposable profile/collection creation must never modify live production Diag.json."""
-        with tempfile.TemporaryDirectory() as tmpdir:
+        from stage_director.obs_disposable_env import get_production_obs_config_dir
+
+        with tempfile.TemporaryDirectory() as prod_dir, tempfile.TemporaryDirectory() as test_dir:
             # Seed mock production Diag.json
-            mock_scenes = os.path.join(tmpdir, "basic", "scenes")
+            mock_scenes = os.path.join(prod_dir, "basic", "scenes")
             os.makedirs(mock_scenes, exist_ok=True)
             mock_diag = os.path.join(mock_scenes, "Diag.json")
             with open(mock_diag, "w", encoding="utf-8") as f:
                 json.dump({"name": "Diag", "sources": []}, f)
 
-            paths = setup_disposable_obs_environment(base_dir=tmpdir)
+            # Setup in dedicated isolated test_dir
+            paths = setup_disposable_obs_environment(base_dir=test_dir)
             self.assertTrue(os.path.exists(paths["profile_ini"]))
             self.assertTrue(os.path.exists(paths["scene_json"]))
 
-            ok, issues = verify_production_isolation(obs_dir=tmpdir)
+            # Verify production dir was completely untouched
+            ok, issues = verify_production_isolation(obs_dir=prod_dir)
             self.assertTrue(ok, f"Production isolation violated: {issues}")
 
-            # Verify Diag.json was not modified
             with open(mock_diag, "r", encoding="utf-8") as f:
                 d = json.load(f)
                 self.assertEqual(d["name"], "Diag")
+
+            # Verify safety guard blocks writing to production root
+            with self.assertRaises(RuntimeError):
+                setup_disposable_obs_environment(base_dir=get_production_obs_config_dir())
 
 
 if __name__ == "__main__":

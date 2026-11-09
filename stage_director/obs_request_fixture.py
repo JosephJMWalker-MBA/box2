@@ -74,16 +74,25 @@ def validate_obs_transform_request(
         if abs(aspect - (16.0 / 9.0)) > 0.05:
             errors.append(f"Visible aspect ratio {aspect:.4f} diverges from 16:9")
 
-        # Check that scaling fills canvas
-        scale_x = transform.get("scaleX", 1.0)
-        scale_y = transform.get("scaleY", 1.0)
-        scaled_w = vis_w * scale_x
-        scaled_h = vis_h * scale_y
+        # Check that bounds or scaling fills canvas
+        bounds_type = transform.get("boundsType", "OBS_BOUNDS_NONE")
+        if bounds_type == "OBS_BOUNDS_SCALE_INNER":
+            bounds_w = transform.get("boundsWidth", 0.0)
+            bounds_h = transform.get("boundsHeight", 0.0)
+            if abs(bounds_w - canvas_width) > 2.0:
+                errors.append(f"Bounds width {bounds_w:.1f} does not match canvas {canvas_width}")
+            if abs(bounds_h - canvas_height) > 2.0:
+                errors.append(f"Bounds height {bounds_h:.1f} does not match canvas {canvas_height}")
+        else:
+            scale_x = transform.get("scaleX", 1.0)
+            scale_y = transform.get("scaleY", 1.0)
+            scaled_w = vis_w * scale_x
+            scaled_h = vis_h * scale_y
 
-        if abs(scaled_w - canvas_width) > 2.0:
-            errors.append(f"Scaled width {scaled_w:.1f} does not fill canvas {canvas_width}")
-        if abs(scaled_h - canvas_height) > 2.0:
-            errors.append(f"Scaled height {scaled_h:.1f} does not fill canvas {canvas_height}")
+            if abs(scaled_w - canvas_width) > 2.0:
+                errors.append(f"Scaled width {scaled_w:.1f} does not fill canvas {canvas_width}")
+            if abs(scaled_h - canvas_height) > 2.0:
+                errors.append(f"Scaled height {scaled_h:.1f} does not fill canvas {canvas_height}")
 
     return (len(errors) == 0, errors)
 

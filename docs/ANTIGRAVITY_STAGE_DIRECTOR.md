@@ -232,6 +232,40 @@ Tested three OBS transform strategies rendering the 4K source onto a broadcast 1
   python3 -m stage_director.simulate_framing
   ```
 
+## Milestone 5: Jetson Orin Nano 8GB Feasibility Benchmark & Code Corrections
+
+Addressed the two Milestone 4 review corrections and executed the empirical Jetson Orin Nano 8GB hardware benchmark:
+
+### 1. Milestone 4 Corrections Completed
+- **Transform Defaults**: Updated `translate_to_obs_request()` in `stage_director/obs_transform.py` so that `strategy="bounds_inner"` is the active default. Crop proposals now default to clean `scale = (1.0, 1.0)` with `boundsType="OBS_BOUNDS_SCALE_INNER"`, matching the recommended findings and avoiding double-scaling.
+- **Strict OBS Isolation & Protection**:
+  - `stage_director/obs_disposable_env.py` now defaults to a completely separate configuration root (`~/.box2_obs_isolated_test`), never touching the production OBS directory.
+  - Added safety guard rejecting any attempt to write into the live production OBS directory unless explicitly overridden.
+  - Added `overwrite=False` safeguard against accidental test file overwriting.
+  - Production `Diag.json`, `Untitled.json`, and `user.ini` remain verified 100% clean and untouched.
+
+### 2. Jetson Orin Nano 8GB Empirical Benchmark Results
+Full report documented in [`docs/JETSON_BENCHMARK_REPORT.md`](JETSON_BENCHMARK_REPORT.md) and benchmark script at `tools/jetson/benchmark_jetson_encoding.py`:
+
+- **Hardware & Environment**:
+  - NVIDIA Jetson Orin Nano Developer Kit Super (8GB) running L4T R39.2.1 (JetPack 6.x) on Ubuntu 24.04.4 LTS (Linux 6.8.12-1021-tegra, aarch64).
+  - 6-core ARM Cortex-A78AE CPU @ up to 1.728 GHz in 25W MAXN power mode.
+  - CUDA 13.2 (V13.2.86), TensorRT 10.16.2.10, OpenCV 4.8.0, FFmpeg 8.0.1, GStreamer 1.24.2.
+- **Stage Director Portable Math Overhead**:
+  - Executed 1,800 consecutive synthetic framing updates (60.0s equivalent @ 30 FPS).
+  - Frame latency: **1.18 microseconds (µs) per frame** (throughput: **845,577 FPS**).
+  - Consumes only **0.0035%** of the 33.3ms frame budget.
+- **1080p30 H.264 Software Encoding Performance**:
+  - Real-time paced (`-re`) at 4500 kbps across 20-second benchmarks:
+    - **`ultrafast`**: **31.0 FPS sustained** (1.02× speed, 0 dropped frames, peak 47.1°C).
+    - **`veryfast`**: **31.0 FPS sustained** (1.02× speed, 0 dropped frames, peak 47.5°C).
+    - **`faster`**: **31.0 FPS sustained** (1.02× speed, 0 dropped frames, peak 48.0°C).
+  - Unconstrained throughput: **60.0 FPS** (2.0× real-time) at `veryfast`, **70.0 FPS** (2.33× real-time) at `ultrafast`.
+- **Thermals & Throttling**:
+  - Peak temperature under continuous 1080p30 load reached only **47.5°C** (thermal rise: +0.9°C).
+  - **Zero throttling observed**; CPU core frequencies remained steady at governor target.
+- **Conclusion**: The Jetson Orin Nano 8GB can reliably execute the full intelligent video broadcast pipeline (hardware RTSP decode via NVDEC, Stage Director Python framing, hardware scaling via NVMM/VIC, and software encoding via `libx264 veryfast`) autonomously without the Mac host.
+
 ## Integration steps only after read-only audits
 
 1. Verify installed Reolink firmware/control support, whether direct camera vs NVR RTSP is used, and PTZ limits; first test physical PTZ offline.
