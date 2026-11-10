@@ -1,0 +1,301 @@
+{
+  "benchmark_metadata": {
+    "title": "Box2 Stage Director Milestone 6 Jetson Validation",
+    "device": "NVIDIA Jetson Orin Nano 8GB",
+    "jetpack_version": "JetPack 7.2.1 (L4T R39.2.1)",
+    "start_time_utc": "2026-11-10T01:06:19.493880+00:00",
+    "duration_requested_s": 75.0,
+    "target_resolution": "1920x1080",
+    "target_fps": 30.0,
+    "codec_video": "h264 (libx264, preset=veryfast, zerolatency)",
+    "codec_audio": "aac (48kHz stereo, 128 kbps)",
+    "network_egress": "NONE (sandboxed local file)"
+  },
+  "live_service_baseline_audit": {
+    "pre_run": {
+      "service_detected": true,
+      "pid": 266619,
+      "uptime": "19-22:42:46",
+      "restarts": 87,
+      "stream_fps": 10.02,
+      "cpu_percent": 6.8,
+      "rss_mb": 69.6,
+      "video_architecture": "passthrough_remux (-c:v copy)",
+      "service_state": "live"
+    },
+    "post_run": {
+      "service_detected": true,
+      "pid": 266619,
+      "uptime": "19-22:44:16",
+      "restarts": 87,
+      "stream_fps": 10.02,
+      "cpu_percent": 6.8,
+      "rss_mb": 69.6,
+      "video_architecture": "passthrough_remux (-c:v copy)",
+      "service_state": "live"
+    },
+    "uninterrupted_continuity_verified": true
+  },
+  "face_detection_decoupled_benchmark": {
+    "Native 4K": {
+      "resolution": "3840x2160",
+      "avg_latency_ms": 577.07,
+      "max_fps": 1.7,
+      "true_positives": 1,
+      "false_positives": 0,
+      "misses": 0,
+      "realtime_viable_at_30fps": false
+    },
+    "1080p": {
+      "resolution": "1920x1080",
+      "avg_latency_ms": 170.12,
+      "max_fps": 5.9,
+      "true_positives": 1,
+      "false_positives": 0,
+      "misses": 0,
+      "realtime_viable_at_30fps": false
+    },
+    "qHD 540p": {
+      "resolution": "960x540",
+      "avg_latency_ms": 65.91,
+      "max_fps": 15.2,
+      "true_positives": 1,
+      "false_positives": 0,
+      "misses": 0,
+      "realtime_viable_at_30fps": false
+    },
+    "Sub-stream 360p": {
+      "resolution": "640x360",
+      "avg_latency_ms": 34.89,
+      "max_fps": 28.7,
+      "true_positives": 1,
+      "false_positives": 0,
+      "misses": 0,
+      "realtime_viable_at_30fps": false
+    }
+  },
+  "scenario_metadata": {
+    "duration_seconds": 75.0,
+    "fps": 30,
+    "total_frames": 2250,
+    "phases": [
+      {
+        "name": "Phase 1: Arm & Host Confirmation",
+        "time_range": "0.0s - 3.0s"
+      },
+      {
+        "name": "Phase 2: Smooth Pacing Tracking",
+        "time_range": "3.0s - 20.0s"
+      },
+      {
+        "name": "Phase 3: Offstage Bystander Rejection",
+        "time_range": "20.0s - 30.0s"
+      },
+      {
+        "name": "Phase 4: Secondary Onstage & Operator Switch",
+        "time_range": "30.0s - 42.0s"
+      },
+      {
+        "name": "Phase 5: Subject Loss (2.0s Hold -> Safe Wide)",
+        "time_range": "42.0s - 50.0s"
+      },
+      {
+        "name": "Phase 6: Performer Reacquisition",
+        "time_range": "50.0s - 58.0s"
+      },
+      {
+        "name": "Phase 7: Performance Countdown Cues",
+        "time_range": "58.0s - 68.0s"
+      },
+      {
+        "name": "Phase 8: Operator Emergency Blackout",
+        "time_range": "68.0s - 75.0s"
+      }
+    ]
+  },
+  "pipeline_execution_summary": {
+    "total_frames_processed": 2250,
+    "duration_seconds": 75.05,
+    "effective_fps": 30.0,
+    "output_resolution": [
+      1920,
+      1080
+    ],
+    "output_size_bytes": 15090898,
+    "sha256_hash": "ed79645bb06bcb946bc90cbd4359fb45132e677623c785ab262e1bf8c173df90",
+    "pts_monotonic": true,
+    "max_pts_jitter_ms": 0.067
+  },
+  "ffprobe_independent_verification": {
+    "valid": true,
+    "format": {
+      "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+      "duration": 75.157,
+      "size": 15090898,
+      "bit_rate": 1606333
+    },
+    "video": {
+      "codec_name": "h264",
+      "profile": "High",
+      "width": 1920,
+      "height": 1080,
+      "r_frame_rate": "30/1",
+      "pix_fmt": "yuv420p",
+      "nb_frames": 2250
+    },
+    "audio": {
+      "codec_name": "aac",
+      "sample_rate": 48000,
+      "channels": 2,
+      "bit_rate": 127989
+    },
+    "pts_monotonic": true,
+    "total_video_packets": 2250,
+    "total_audio_packets": 0
+  },
+  "telemetry_tegrastats": {
+    "samples_count": 75,
+    "ram_used_mb": {
+      "min": 2787,
+      "max": 2936,
+      "mean": 2879.5
+    },
+    "swap_used_mb": {
+      "min": 1034,
+      "max": 1034,
+      "mean": 1034.0
+    },
+    "cpu_avg_percent": {
+      "min": 16.2,
+      "max": 66.8,
+      "mean": 51.8
+    },
+    "gpu_percent": {
+      "min": 0,
+      "max": 0,
+      "mean": 0.0
+    },
+    "temp_cpu_c": {
+      "min": 46.8,
+      "max": 48.8,
+      "mean": 48.0
+    },
+    "temp_gpu_c": {
+      "min": 46.9,
+      "max": 48.4,
+      "mean": 47.8
+    },
+    "temp_soc_c": {
+      "min": 45.1,
+      "max": 46.4,
+      "mean": 45.9
+    },
+    "power_vdd_in_mw": {
+      "min": 5181,
+      "max": 7414,
+      "mean": 6719.1
+    },
+    "power_vdd_cpu_gpu_cv_mw": {
+      "min": 593,
+      "max": 2154,
+      "mean": 1506.9
+    },
+    "power_vdd_soc_mw": {
+      "min": 1542,
+      "max": 1726,
+      "mean": 1692.9
+    }
+  },
+  "transition_stills_verification": {
+    "01_arm_safe_wide": {
+      "frame_index": 15,
+      "filename": "still_01_arm_safe_wide_f0015.png",
+      "filepath": "tools/jetson/stills/still_01_arm_safe_wide_f0015.png",
+      "mean_luminance": 32.64,
+      "non_zero_pixels": 6212638,
+      "solid_black_fail_closed": false
+    },
+    "02_host_confirmed_medium_shot": {
+      "frame_index": 60,
+      "filename": "still_02_host_confirmed_medium_shot_f0060.png",
+      "filepath": "tools/jetson/stills/still_02_host_confirmed_medium_shot_f0060.png",
+      "mean_luminance": 33.99,
+      "non_zero_pixels": 6212633,
+      "solid_black_fail_closed": false
+    },
+    "03_smooth_pacing_tracking": {
+      "frame_index": 300,
+      "filename": "still_03_smooth_pacing_tracking_f0300.png",
+      "filepath": "tools/jetson/stills/still_03_smooth_pacing_tracking_f0300.png",
+      "mean_luminance": 34.12,
+      "non_zero_pixels": 6211781,
+      "solid_black_fail_closed": false
+    },
+    "04_offstage_bystander_rejected": {
+      "frame_index": 700,
+      "filename": "still_04_offstage_bystander_rejected_f0700.png",
+      "filepath": "tools/jetson/stills/still_04_offstage_bystander_rejected_f0700.png",
+      "mean_luminance": 34.01,
+      "non_zero_pixels": 6211602,
+      "solid_black_fail_closed": false
+    },
+    "05_operator_switched_secondary": {
+      "frame_index": 1100,
+      "filename": "still_05_operator_switched_secondary_f1100.png",
+      "filepath": "tools/jetson/stills/still_05_operator_switched_secondary_f1100.png",
+      "mean_luminance": 38.12,
+      "non_zero_pixels": 6203547,
+      "solid_black_fail_closed": false
+    },
+    "06_subject_loss_hold_position": {
+      "frame_index": 1300,
+      "filename": "still_06_subject_loss_hold_position_f1300.png",
+      "filepath": "tools/jetson/stills/still_06_subject_loss_hold_position_f1300.png",
+      "mean_luminance": 30.05,
+      "non_zero_pixels": 6219902,
+      "solid_black_fail_closed": false
+    },
+    "07_subject_loss_fallback_wide": {
+      "frame_index": 1400,
+      "filename": "still_07_subject_loss_fallback_wide_f1400.png",
+      "filepath": "tools/jetson/stills/still_07_subject_loss_fallback_wide_f1400.png",
+      "mean_luminance": 30.6,
+      "non_zero_pixels": 6215917,
+      "solid_black_fail_closed": false
+    },
+    "08_seamless_reacquisition": {
+      "frame_index": 1600,
+      "filename": "still_08_seamless_reacquisition_f1600.png",
+      "filepath": "tools/jetson/stills/still_08_seamless_reacquisition_f1600.png",
+      "mean_luminance": 34.0,
+      "non_zero_pixels": 6207633,
+      "solid_black_fail_closed": false
+    },
+    "09_cue_warn_60": {
+      "frame_index": 1850,
+      "filename": "still_09_cue_warn_60_f1850.png",
+      "filepath": "tools/jetson/stills/still_09_cue_warn_60_f1850.png",
+      "mean_luminance": 34.0,
+      "non_zero_pixels": 6207633,
+      "solid_black_fail_closed": false
+    },
+    "10_cue_time_up_safe_wide": {
+      "frame_index": 2050,
+      "filename": "still_10_cue_time_up_safe_wide_f2050.png",
+      "filepath": "tools/jetson/stills/still_10_cue_time_up_safe_wide_f2050.png",
+      "mean_luminance": 34.0,
+      "non_zero_pixels": 6207633,
+      "solid_black_fail_closed": false
+    },
+    "11_operator_emergency_blackout": {
+      "frame_index": 2200,
+      "filename": "still_11_operator_emergency_blackout_f2200.png",
+      "filepath": "tools/jetson/stills/still_11_operator_emergency_blackout_f2200.png",
+      "mean_luminance": 0.0,
+      "non_zero_pixels": 20,
+      "max_pixel_value": 1,
+      "solid_black_fail_closed": true,
+      "note": "20 of 2,073,600 pixels have green value of 1 due to H.264 lossy DCT quantization; mean luminance is 0.00."
+    }
+  }
+}

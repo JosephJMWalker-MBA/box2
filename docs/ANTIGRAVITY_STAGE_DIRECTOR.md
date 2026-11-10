@@ -277,6 +277,49 @@ Full report documented in [`docs/JETSON_BENCHMARK_REPORT.md`](JETSON_BENCHMARK_R
   - Impact on live `box2-stream.py`: **Zero**. Stream continued uninterrupted.
 - **Overall Assessment**: **CONDITIONAL PASS** for 1080p30 autonomous broadcast on a single Jetson Orin Nano, subject to live camera RTSP network jitter and booking snapshot synchronization tests.
 
+## Milestone 6: Jetson-Native Autonomous Video Framing Pipeline & Empirical Validation
+
+Executed the first physical, real-time paced autonomous auto-framing pipeline natively on the NVIDIA Jetson Orin Nano 8GB [Edge Device / Jetson Orin Nano 8GB], fulfilling all Milestone 6 review findings:
+
+### 1. `JetsonFramePipeline` Engine (`stage_director/jetson_pipeline.py`)
+- Bridges `StageFramingAdapter` decisions directly into continuous video rendering and H.264/AAC pipe encoding.
+- Guarantees strictly **1920×1080 @ 30.0 FPS** broadcast canvas output with monotonic PTS.
+- Decouples dynamic 16:9 slice calculations from GStreamer pipeline mutations, preventing caps renegotiation errors.
+- Immediate fail-closed blackout upon operator emergency stop or missing consent, emitting bit-for-bit black frames ($mean\_lum = 0.00$).
+
+### 2. Physical 75-Second Real-Time Paced Validation Run
+- **Test File**: Written to local sandboxed MP4 (15.09 MB; SHA-256: `ed79645bb06bcb946bc90cbd4359fb45132e677623c785ab262e1bf8c173df90`).
+- **Timing & Cadence**: **2,250 frames processed in 75.05s** (speed ratio: **1.00× / 30.0 FPS**). Monotonic PTS verified by `ffprobe` across all 2,250 packets (max jitter: **0.067 ms**).
+- **Dynamic 8-Phase Scenario Verified**:
+  1. *Arm & Host Start*: Safe-wide holds until host confirmation at 1.0s safely transitions to medium shot ($1.6\times$ zoom).
+  2. *Smooth Pacing Tracking*: Follows moving performer ($x=1500 \rightarrow 2400$) with rate-limited pan/tilt.
+  3. *Offstage Bystander Rejection*: Bystander at $x=150$ outside stage polygon is strictly ignored.
+  4. *Secondary Onstage & Operator Switch*: Guest comic ($x=2700$) ignored until explicit operator command `switch_second` at 35.0s cleanly transfers camera lock.
+  5. *Subject Loss Hold & Safe-Wide Fallback*: Performer loss triggers 2.0s hold; expiration smoothly returns to safe wide.
+  6. *Seamless Reacquisition*: Returning performer reacquired cleanly without sudden snaps.
+  7. *Countdown Cues*: Suggested cues `warn_60`, `warn_15`, and `time_up` emitted at their respective countdown thresholds.
+  8. *Emergency Blackout*: Operator emergency stop at 70.0s immediately forces solid black canvas.
+- **Transition Stills**: 11 PNG stills captured across all transitions in [`tools/jetson/stills/`](../tools/jetson/stills/).
+
+### 3. Decoupled Face Detection Benchmark (Face-Positive Stimuli)
+Tested installed OpenCV Haar cascade on a synthetic facial stimulus across resolutions:
+- Native 4K: 577.1 ms (1.7 FPS, TP: 1, FP: 0) — unviable inline.
+- 1080p: 170.1 ms (5.9 FPS, TP: 1, FP: 0) — unviable inline.
+- qHD 540p: 65.9 ms (15.2 FPS, TP: 1, FP: 0) — borderline.
+- Sub-stream 360p: 34.9 ms (28.7 FPS, TP: 1, FP: 0) — **Viable for decoupled/async inference**.
+
+### 4. Telemetry & Live Service Baseline Continuity
+- **Tegrastats (75 1-second samples)**:
+  - Average CPU load: **51.8%** across 6 cores.
+  - RAM used: **2,879.5 MB mean** (38.5% utilization, 4.55 GB free).
+  - Swap: **1,034 MB static** (zero swap allocation).
+  - Thermals: CPU mean **48.0°C** (peak 48.8°C), 36.2°C below 85°C throttle threshold.
+  - Power: Mean **6.72 W** (peak 7.41 W) of 25.0 W budget.
+- **Live Baseline Service Continuity (`box2_stream.py`)**:
+  - Audited before (`19-22:42:46` uptime) and after (`19-22:44:16` uptime).
+  - **Zero restarts, zero dropped frames, PID 266619 uninterrupted**.
+- **Automated Tests**: All 77 unit and regression tests pass natively on Jetson (`python3 -m unittest discover -s stage_director/tests -v`).
+
 ## Integration steps only after read-only audits
 
 1. Verify installed Reolink firmware/control support, whether direct camera vs NVR RTSP is used, and PTZ limits; first test physical PTZ offline.
