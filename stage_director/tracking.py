@@ -53,7 +53,8 @@ class PerformerTracker:
                  max_performer_speed_px_s: float = 1500.0,
                  max_area_ratio: float = 3.0,
                  require_confirmation_after_loss: bool = True,
-                 allow_proximity_reacquisition: bool = False) -> None:
+                 allow_proximity_reacquisition: bool = False,
+                 max_performer_y: Optional[float] = None) -> None:
         self.stage_polygon = stage_polygon or StagePolygon.default_stage()
         self.loss_hold_seconds = loss_hold_seconds
         self.min_confidence = min_confidence
@@ -62,6 +63,7 @@ class PerformerTracker:
         self.max_area_ratio = max_area_ratio
         self.require_confirmation_after_loss = require_confirmation_after_loss
         self.allow_proximity_reacquisition = allow_proximity_reacquisition
+        self.max_performer_y = max_performer_y
 
         self.state: TrackingState = TrackingState.DISABLED
         self.active_subject: Optional[BoundingBox] = None
@@ -155,11 +157,14 @@ class PerformerTracker:
 
         events: List[str] = []
 
-        # 1. Filter out offstage bystanders and low-confidence detections
+        # 1. Filter out offstage bystanders, floor objects/pets, and low-confidence detections
         onstage_boxes: List[BoundingBox] = []
         offstage_count = 0
         for box in detections:
             if box.confidence < self.min_confidence:
+                continue
+            if self.max_performer_y is not None and box.center_y > self.max_performer_y:
+                offstage_count += 1
                 continue
             if self.stage_polygon.contains_box(box):
                 onstage_boxes.append(box)

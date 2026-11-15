@@ -55,13 +55,15 @@ def main():
     writer = cv2.VideoWriter(args.output, fourcc, fps, (out_w, out_h))
 
     # Stage polygon scaled to input resolution (1280x720)
+    # Standing comedian head is in y in [50, 215]; floor/pets (y > 220) and offstage are excluded.
     scale_x = width / 640.0
     scale_y = height / 360.0
+    floor_cutoff_y = int(215 * scale_y)
     stage_vertices = [
-        (int(150 * scale_x), int(60 * scale_y)),
-        (int(440 * scale_x), int(60 * scale_y)),
-        (int(440 * scale_x), int(355 * scale_y)),
-        (int(150 * scale_x), int(355 * scale_y)),
+        (int(150 * scale_x), int(50 * scale_y)),
+        (int(440 * scale_x), int(50 * scale_y)),
+        (int(440 * scale_x), floor_cutoff_y),
+        (int(150 * scale_x), floor_cutoff_y),
     ]
     stage_polygon = StagePolygon(vertices=stage_vertices)
 
@@ -85,6 +87,7 @@ def main():
         stage_polygon=stage_polygon,
         loss_hold_seconds=2.5,
         allow_proximity_reacquisition=True,
+        max_performer_y=float(floor_cutoff_y),
     )
     adapter = StageFramingAdapter(
         config=framing_config,

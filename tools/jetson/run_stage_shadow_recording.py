@@ -148,16 +148,15 @@ def run_stage_shadow_recorder(
 
     # 3. Initialize Stage Polygon & Stage Director Engine
     print("[3/5] Configuring Stage Polygon and Tracking Engine...")
-    # Physical Box2 stage polygon coordinates scaled to input resolution:
-    # On 640x360: stage rug is roughly x in [160, 440], y in [70, 355]
-    # Poster on wall (x~525) and jukebox (x~460) are outside the stage polygon.
+    # Standing comedian head is in y in [50, 210]; floor/pets (y > 220) and offstage are excluded.
     scale_x = src_w / 640.0
     scale_y = src_h / 360.0
+    floor_cutoff_y = int(215 * scale_y)
     stage_vertices = [
-        (int(150 * scale_x), int(60 * scale_y)),
-        (int(440 * scale_x), int(60 * scale_y)),
-        (int(440 * scale_x), int(355 * scale_y)),
-        (int(150 * scale_x), int(355 * scale_y)),
+        (int(150 * scale_x), int(50 * scale_y)),
+        (int(440 * scale_x), int(50 * scale_y)),
+        (int(440 * scale_x), floor_cutoff_y),
+        (int(150 * scale_x), floor_cutoff_y),
     ]
     stage_polygon = StagePolygon(vertices=stage_vertices)
 
@@ -178,6 +177,9 @@ def run_stage_shadow_recorder(
     tracker = PerformerTracker(
         stage_polygon=stage_polygon,
         loss_hold_seconds=2.5,
+        allow_proximity_reacquisition=True,
+        max_performer_y=float(floor_cutoff_y),
+    )
         allow_proximity_reacquisition=True,
     )
     adapter = StageFramingAdapter(

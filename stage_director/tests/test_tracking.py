@@ -165,6 +165,34 @@ class TrackingTests(unittest.TestCase):
         self.assertIsNone(res.active_subject)
         self.assertIn("performer_confirmation_required", res.events)
 
+    def test_floor_pets_and_objects_rejected_by_max_performer_y(self):
+        """Objects/pets on the floor (below human standing height) are strictly ignored."""
+        tracker = PerformerTracker(
+            self.stage,
+            max_performer_y=1200.0,  # Floor cutoff: standing human heads are <= 1200
+        )
+        tracker.enable()
+
+        # Dog or pet detected on floor at y=1600 (within polygon x range, but on floor)
+        dog_box = BoundingBox(x=1800.0, y=1600.0, width=100.0, height=100.0)
+        res = tracker.update([dog_box], monotonic_seconds=10.0)
+
+        # Dog must be counted as offstage and NOT acquired!
+        self.assertEqual(res.state, TrackingState.ACQUIRING)
+        self.assertIsNone(res.active_subject)
+        self.assertEqual(res.onstage_count, 0)
+        self.assertEqual(res.offstage_count, 1)
+
+        # Standing human performer appears at y=700 (above floor cutoff)
+        human_box = BoundingBox(x=1800.0, y=700.0, width=120.0, height=150.0)
+        res_human = tracker.update([dog_box, human_box], monotonic_seconds=10.1)
+
+        # Only the human is acquired!
+        self.assertEqual(res_human.state, TrackingState.TRACKING)
+        self.assertEqual(res_human.active_subject, human_box)
+        self.assertEqual(res_human.onstage_count, 1)
+        self.assertEqual(res_human.offstage_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
