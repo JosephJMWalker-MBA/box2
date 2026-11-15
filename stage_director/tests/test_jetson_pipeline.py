@@ -1,5 +1,5 @@
-"""Unit tests for JetsonFramePipeline."""
-from datetime import datetime, timezone
+"""Unit tests for JetsonFramePipeline (Milestone 7)."""
+from datetime import datetime, timedelta, timezone
 import os
 import tempfile
 import unittest
@@ -14,6 +14,7 @@ except ImportError:
     np = None
     HAS_CV2_NUMPY = False
 
+from stage_director.core import BookingSnapshot, CaptureLifecycle
 from stage_director.geometry import BoundingBox
 from stage_director.jetson_pipeline import JetsonFramePipeline, PipelineSummary
 from stage_director.obs_transform import OBSProposal
@@ -35,6 +36,7 @@ class JetsonPipelineSliceTests(unittest.TestCase):
         self,
         camera_action: str = "track_face",
         mode: str = "live",
+        capture_lifecycle: str = "live_public",
         obs_crop=None,
         framing=None,
     ) -> OBSProposal:
@@ -50,6 +52,7 @@ class JetsonPipelineSliceTests(unittest.TestCase):
             obs_crop=obs_crop,
             framing=framing,
             events=[],
+            capture_lifecycle=capture_lifecycle,
         )
 
     def test_calculate_crop_slice_default_and_capture_off(self) -> None:
@@ -107,6 +110,7 @@ class JetsonPipelineTransformTests(unittest.TestCase):
         self,
         camera_action: str = "track_face",
         mode: str = "live",
+        capture_lifecycle: str = "live_public",
         obs_crop=None,
         framing=None,
     ) -> OBSProposal:
@@ -122,6 +126,7 @@ class JetsonPipelineTransformTests(unittest.TestCase):
             obs_crop=obs_crop,
             framing=framing,
             events=[],
+            capture_lifecycle=capture_lifecycle,
         )
 
     def test_crop_and_scale_frame_fail_closed_black_frame(self) -> None:
@@ -176,19 +181,20 @@ class JetsonPipelineTransformTests(unittest.TestCase):
         self.assertGreater(np.count_nonzero(out_crop), 0)
 
     @patch("subprocess.Popen")
-    def test_run_offline_simulation_mocked_encoder(self, mock_popen: MagicMock) -> None:
-        """Verifies simulation orchestration, metrics recording, and monotonic PTS with mocked encoder."""
+    def test_run_offline_simulation_host_start_and_shutdown(self, mock_popen: MagicMock) -> None:
+        """Verifies genuine host-start, live framing, and emergency shutdown."""
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
-        mock_proc.wait.return_value = 0
+        mock_proc.stdin.closed = False
         mock_popen.return_value = mock_proc
 
         events = [
-            (0.0, [BoundingBox(1800, 800, 200, 260)], "confirm_first"),
-            (0.1, [BoundingBox(1820, 800, 200, 260)], None),
-            (0.2, [BoundingBox(1840, 800, 200, 260)], None),
-            (0.3, [], None),
-            (0.4, [], "emergency_stop"),
+            (0.0, [BoundingBox(1800, 800, 200, 260)], None),              # armed, waiting host start
+            (0.1, [BoundingBox(1800, 800, 200, 260)], "host_start"),       # host confirms set start
+            (0.2, [BoundingBox(1820, 800, 200, 260)], "confirm_first"),     # confirms face
+            (0.3, [BoundingBox(1840, 800, 200, 260)], None),              # live tracking
+            (0.4, [], "emergency_stop"),                                   # emergency stop
+            (0.5, [BoundingBox(1840, 800, 200, 260)], None),              # stopped post-event
         ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -208,14 +214,128 @@ class JetsonPipelineTransformTests(unittest.TestCase):
                 realtime_pacing=False,
             )
 
-            self.assertEqual(summary.total_frames_processed, 5)
+            self.assertEqual(summary.total_frames_processed, 6)
             self.assertEqual(summary.output_resolution, (1920, 1080))
             self.assertTrue(summary.pts_monotonic)
             self.assertGreater(summary.output_size_bytes, 0)
-            self.assertEqual(len(self.pipeline.metrics), 5)
-            self.assertEqual(self.pipeline.metrics[0].mode, "live")
+            self.assertEqual(len(self.pipeline.metrics), 6)
+
+            # Before host start: armed
+            self.assertEqual(self.pipeline.metrics[0].mode, "armed")
+            self.assertEqual(self.pipeline.metrics[0].camera_action, "stage_wide")
+            self.assertEqual(self.pipeline.metrics[0].capture_lifecycle, "armed_public")
+
+            # After host start: live
+            self.assertEqual(self.pipeline.metrics[1].mode, "live")
+            self.assertEqual(self.pipeline.metrics[1].capture_lifecycle, "live_public")
+
+            # After emergency stop: stopped
             self.assertEqual(self.pipeline.metrics[4].camera_action, "capture_off")
-            self.assertEqual(mock_proc.stdin.write.call_count, 5)
+            self.assertEqual(self.pipeline.metrics[4].capture_lifecycle, "stopped")
+
+            # Post-stop iteration 5 had zero reads/writes
+            self.assertGreater(summary.dropped_unauthorized_reads, 0)
+            self.assertGreater(summary.dropped_unauthorized_writes, 0)
+
+    @patch("subprocess.Popen")
+    def test_private_booking_causes_zero_reads_and_writes(self, mock_popen: MagicMock) -> None:
+        """A private booking must fail closed immediately with 0 reads and 0 writes."""
+        mock_proc = MagicMock()
+        mock_proc.stdin = MagicMock()
+        mock_proc.stdin.closed = False
+        mock_popen.return_value = mock_proc
+
+        events = [
+            (0.0, [BoundingBox(1800, 800, 200, 260)], "host_start"),
+            (0.1, [BoundingBox(1820, 800, 200, 260)], None),
+            (0.2, [BoundingBox(1840, 800, 200, 260)], None),
+        ]
+
+        t0 = datetime(2026, 11, 10, 0, 0, tzinfo=timezone.utc)
+        private_booking = BookingSnapshot(
+            booking_id="private-session-proof",
+            revision=1,
+            slot_start_utc=t0,
+            slot_end_utc=t0 + timedelta(minutes=15),
+            issued_at_utc=t0 - timedelta(seconds=30),
+            expires_at_utc=t0 + timedelta(minutes=16),
+            stage_seconds=300,
+            privacy_class="private",
+            checked_in=True,
+            live_consent=False,
+            tracking_consent=False,
+            capture_verified=False,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "private_test.mp4")
+
+            def mock_wait(*args, **kwargs):
+                with open(output_path, "wb") as f:
+                    f.write(b"")
+                return 0
+
+            mock_proc.wait.side_effect = mock_wait
+
+            summary = self.pipeline.run_offline_simulation(
+                timeline_events=events,
+                output_mp4_path=output_path,
+                booking=private_booking,
+                realtime_pacing=False,
+            )
+
+            # Private session must cause ZERO source reads and ZERO sink writes
+            self.assertEqual(summary.source_reads_count, 0)
+            self.assertEqual(summary.sink_writes_count, 0)
+            self.assertEqual(summary.dropped_unauthorized_reads, 3)
+            self.assertEqual(summary.dropped_unauthorized_writes, 3)
+            self.assertEqual(summary.capture_lifecycle, "stopped")
+
+    @patch("subprocess.Popen")
+    def test_revoked_consent_terminates_media_immediately(self, mock_popen: MagicMock) -> None:
+        """Revoking consent mid-stream immediately halts acquisition and closes sink (0 reads/writes after)."""
+        mock_proc = MagicMock()
+        mock_proc.stdin = MagicMock()
+        mock_proc.stdin.closed = False
+        mock_popen.return_value = mock_proc
+
+        events = [
+            (0.0, [BoundingBox(1800, 800, 200, 260)], "host_start"),
+            (0.1, [BoundingBox(1820, 800, 200, 260)], "confirm_first"),
+            (0.2, [BoundingBox(1840, 800, 200, 260)], "revoke_consent"),
+            (0.3, [BoundingBox(1860, 800, 200, 260)], None),
+            (0.4, [BoundingBox(1880, 800, 200, 260)], None),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "revoke_test.mp4")
+
+            def mock_wait(*args, **kwargs):
+                with open(output_path, "wb") as f:
+                    f.write(b"revoked_output")
+                return 0
+
+            mock_proc.wait.side_effect = mock_wait
+
+            summary = self.pipeline.run_offline_simulation(
+                timeline_events=events,
+                output_mp4_path=output_path,
+                realtime_pacing=False,
+            )
+
+            # Exact frame count verification:
+            # Frames 0 and 1 were authorized (2 reads, 2 writes).
+            # Frame 2 commanded revoke_consent -> stopped immediately.
+            # Frames 2, 3, 4 had 0 reads, 0 writes.
+            self.assertEqual(summary.source_reads_count, 2)
+            self.assertEqual(summary.sink_writes_count, 2)
+            self.assertEqual(summary.dropped_unauthorized_reads, 3)
+            self.assertEqual(summary.dropped_unauthorized_writes, 3)
+            self.assertEqual(summary.capture_lifecycle, "stopped")
+
+            # Verify audit event log records media shutdown
+            event_types = [e["event_type"] for e in summary.event_log]
+            self.assertIn("media_shutdown", event_types)
 
 
 if __name__ == "__main__":

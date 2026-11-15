@@ -269,3 +269,75 @@ The NVIDIA Jetson Orin Nano 8GB is hardware-capable of running the complete Stag
 1. Face detection is performed on the camera's sub-stream or asynchronously via TensorRT/GPU.
 2. Frame cropping and scaling is performed via the decoupled Python/OpenCV slice engine or GPU-accelerated pipeline.
 3. Encoding is performed using `libx264 -preset veryfast -tune zerolatency` at 4500 kbps.
+
+---
+
+## 8. Milestone 7 Physical Validation: Actual Authorization, Dual-Stream Packet Analysis & Capture Control
+
+### 8.1 Overview & Review 6 Reconciliation
+Following the Milestone 6 review findings, Milestone 7 was executed directly on the physical **NVIDIA Jetson Orin Nano 8GB** (`joejetson1.local`), demonstrating:
+1. **Genuine Host-Start Action & Natural Countdown Cues**: The stage timer does not advance from vision alone while in `ARMED_PUBLIC` (holding safe wide from $t=0.0\text{s}$ to $t=3.0\text{s}$). At $t=3.0\text{s}$, explicit operator confirmation (`start_set(host_confirmed=True)`) initiates a 50-second performance booking. Natural countdown cues (`warn_15` at 15s remaining, $t=38.0\text{s}$; `time_up` at 0s remaining, $t=53.0\text{s}$) fire exactly once and are recorded in an auditable structured event log.
+2. **Strict Separation of Public Output Concealment vs. Genuine Shutdown**:
+   - `BLANK_PUBLIC_OUTPUT`: Output raster is rendered solid black (all zeros), concealing video from the public broadcast while the encoder stream remains alive.
+   - `STOPPED` / `NO_INPUT`: Completely revokes permission to read camera sources (`can_read_source=False`) and write media packets (`can_write_media=False`).
+   - Verified that revoking consent at $t=65.0\text{s}$ causes **strictly 0 source reads and 0 media writes** for all subsequent frames ($t=65.0\text{s}$ to $75.0\text{s}$, 300 frames dropped), closing the media sink immediately.
+3. **Independent Dual-Stream FFprobe Verification**:
+   - Inspects BOTH video and audio packet timestamps, packet count, monotonicity, duration, and A/V synchronization.
+   - Measured video duration: **65.000s** (1,950 frames at 30.0 FPS, last PTS = 64.966667s).
+   - Measured audio duration: **65.002s** (3,048 packets of 48kHz stereo AAC, last PTS = 64.981333s).
+   - A/V start drift: **21.33 ms** (standard AAC 1024-sample priming delay: $1024 / 48000 = 21.33\text{ ms} < 50\text{ ms}$).
+   - A/V end drift: **14.67 ms** ($< 50\text{ ms}$).
+   - Duration drift: **2.00 ms** ($< 50\text{ ms}$).
+   - PTS Monotonicity: **100% strictly monotonic** for both video and audio streams.
+   - Decode Integrity: Full container decode check (`ffmpeg -v error -i ... -f null -`) passed with return code 0.
+4. **Preserved Autonomous Framing Demonstration**:
+   - Demonstrates smooth 16:9 medium-shot tracking of pacing performer, offstage bystander rejection via stage polygon, secondary performer entry and operator switch, 2.0s subject-loss hold, fallback to safe-wide, and seamless reacquisition.
+   - Scripted bounding boxes are clearly distinguished as the framing control source (`framing_control_source = "scripted_ground_truth_bounding_boxes"`), while CPU face detection is bench-tested in isolation (`face_detector_status = "decoupled_benchmark_only (not in live framing loop)"`).
+5. **Zero Impact on Production Service**:
+   - Live production service `box2_stream.py` (PID 266619) remained completely uninterrupted throughout the benchmark run (uptime > 24 days, 91 restarts before, 91 restarts after, 0 new restarts, 10.41 stream FPS constant).
+   - Strict network sandbox: Output written only to local `/tmp` MP4 file; zero network egress to Twitch or external services.
+
+### 8.2 Execution Telemetry & Resource Utilization
+
+| Metric | Measured Baseline (Milestone 7) | Budget / Margin |
+| :--- | :--- | :--- |
+| **Duration & Pacing** | 75.00s total wall time (2,250 frames @ 30.0 FPS) | Real-time paced |
+| **CPU Utilization (6 Cores)** | Mean: **44.1%**, Max: **66.8%** | **33.2% peak CPU headroom** |
+| **RAM Usage** | Mean: **2,648.8 MB**, Max: **2,756 MB** | **5,436 MB free RAM (66.3%)** |
+| **Swap Usage** | Constant: **1,160.0 MB** | **0 MB swap allocation growth** |
+| **Thermal Equilibrium** | CPU: **46.9°C**, GPU: **46.8°C**, SoC: **45.0°C** | **38.1°C below 85°C thermal throttle** |
+| **Power Consumption (`VDD_IN`)** | Mean: **6,483.3 mW** (~6.48 W), Max: **7,728 mW** | Well within 15W / 25W Jetson power mode |
+| **Output File Size** | 16,601,711 bytes (~16.6 MB) | 4500 kbps target video bitrate |
+| **SHA-256 Digest** | `7fdc8be361f6960492a6a9ba9e19ba0f9aee63ac85e515d3528b78482d433b79` | Deterministic verification |
+
+### 8.3 Structured Audit Event Log
+
+The benchmark recorded an auditable log of every lifecycle state transition and countdown cue event:
+
+| Event Index | UTC Timestamp | Monotonic (s) | Event Type | Lifecycle State | Action | Remaining (s) | Cue | Source Reads | Sink Writes |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| 0 | `2026-11-10T00:00:03Z` | 1003.0 | `host_confirmed_start` | `live_public` | `live` | 50 | — | 90 | 90 |
+| 1 | `2026-11-10T00:00:03Z` | 1003.0 | `lifecycle_transition_to_live_public` | `live_public` | `track_face` | 50 | — | 90 | 90 |
+| 2 | `2026-11-10T00:00:38Z` | 1038.0 | `cue_warn_15` | `live_public` | `track_face` | 15 | `warn_15` | 1140 | 1140 |
+| 3 | `2026-11-10T00:00:53Z` | 1053.0 | `cue_time_up` | `armed_public` | `stage_wide` | 0 | `time_up` | 1590 | 1590 |
+| 4 | `2026-11-10T00:00:53Z` | 1053.0 | `lifecycle_transition_to_armed_public`| `armed_public` | `stage_wide` | 0 | `time_up` | 1590 | 1590 |
+| 5 | `2026-11-10T00:01:05Z` | 1065.0 | `media_shutdown` | `stopped` | `capture_off` | — | — | 1950 | 1950 |
+| 6 | `2026-11-10T00:01:05Z` | 1065.0 | `lifecycle_transition_to_stopped` | `stopped` | `capture_off` | — | — | 1950 | 1950 |
+
+### 8.4 Verification Transition Stills
+
+The 11 key transition stills were extracted and verified:
+1. `m7_still_01_arm_safe_wide_pre_start_f0015.png` (Frame 15, $t=0.5\text{s}$): Armed safe-wide prior to host confirmation.
+2. `m7_still_02_host_confirmed_medium_shot_f0120.png` (Frame 120, $t=4.0\text{s}$): Host confirmed set start; active 16:9 medium shot tracking initiated.
+3. `m7_still_03_smooth_pacing_tracking_f0300.png` (Frame 300, $t=10.0\text{s}$): Dynamic pan/tilt smoothly tracking performer pacing across stage.
+4. `m7_still_04_offstage_bystander_rejected_f0700.png` (Frame 700, $t=23.3\text{s}$): Offstage bystander rejected by stage polygon; performer remains locked.
+5. `m7_still_05_operator_switched_guest_f1050.png` (Frame 1050, $t=35.0\text{s}$): Operator switched target to secondary performer (guest).
+6. `m7_still_06_natural_warn_15_cue_f1140.png` (Frame 1140, $t=38.0\text{s}$): Performance countdown reaches 15s remaining; natural `warn_15` cue emitted.
+7. `m7_still_07_subject_loss_hold_position_f1180.png` (Frame 1180, $t=39.3\text{s}$): Performer disappears; tracking holds position for 2.0s without jerking.
+8. `m7_still_08_subject_loss_fallback_wide_f1300.png` (Frame 1300, $t=43.3\text{s}$): Loss timeout expires; smooth fallback to safe-wide.
+9. `m7_still_09_seamless_reacquisition_f1440.png` (Frame 1440, $t=48.0\text{s}$): Performer returns to stage; seamless lock reacquired.
+10. `m7_still_10_natural_time_up_cue_wide_f1600.png` (Frame 1600, $t=53.3\text{s}$): Performance time expires (50s elapsed); `time_up` cue emitted, switching to safe-wide.
+11. `m7_still_11_post_set_safe_wide_f1900.png` (Frame 1900, $t=63.3\text{s}$): Post-set period held in safe-wide until consent revoked at $t=65.0\text{s}$.
+
+### 8.5 External Hardware Gate Clarification
+As noted throughout the architectural design, software-level permissions (`can_read_source=False`, `can_write_media=False`) ensure that the local broadcast pipeline drops all video reads and halts encoding immediately upon session revocation or private mode. However, physical camera-internal recording paths (such as Reolink SD card recording or independent Reolink NVR RTSP pulls) remain an **unverified external gate outside the Python application scope** that must be independently isolated at the physical/network layer.

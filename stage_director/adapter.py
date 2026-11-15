@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
-from .core import BookingSnapshot, CameraAction, Decision, Mode, StageDirector
+from .core import BookingSnapshot, CameraAction, CaptureLifecycle, Decision, Mode, StageDirector
 from .framing import FramingConfig, FramingEngine, FramingWindow
 from .geometry import BoundingBox, StagePolygon
 from .obs_transform import OBSProposal
@@ -40,6 +40,11 @@ class StageFramingAdapter:
         )
         self.framing = framing_engine or FramingEngine(self.config)
         self._was_active = False
+
+    @property
+    def capture_lifecycle(self) -> CaptureLifecycle:
+        """Current physical capture and recording lifecycle state."""
+        return self.director.capture_lifecycle
 
     def arm(self, booking: BookingSnapshot, now_utc: datetime) -> OBSProposal:
         """Arm a consented set; defaults camera to safe wide shot."""
@@ -244,4 +249,5 @@ class StageFramingAdapter:
             cue=decision.cue.value if decision.cue else None,
             remaining_seconds=decision.remaining_seconds,
             reason=decision.reason,
+            capture_lifecycle=decision.capture_lifecycle.value,
         )

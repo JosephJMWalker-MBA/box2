@@ -318,7 +318,35 @@ Tested installed OpenCV Haar cascade on a synthetic facial stimulus across resol
 - **Live Baseline Service Continuity (`box2_stream.py`)**:
   - Audited before (`19-22:42:46` uptime) and after (`19-22:44:16` uptime).
   - **Zero restarts, zero dropped frames, PID 266619 uninterrupted**.
-- **Automated Tests**: All 77 unit and regression tests pass natively on Jetson (`python3 -m unittest discover -s stage_director/tests -v`).
+- **Automated Tests**: All 86 unit and regression tests pass natively on Jetson (`python3 -m unittest discover -s stage_director/tests -v`).
+
+## Milestone 7: Actual Authorization, Dual-Stream Packet Analysis & Capture Control
+
+Status: **Implemented, offline tested on Jetson Orin Nano, zero live hardware or network connection**.
+
+### Implemented Architectural Features
+1. **Explicit Capture Lifecycle (`CaptureLifecycle`)**:
+   - `NO_INPUT`: Default unconfigured state on boot. Zero source reads, zero media writes.
+   - `ARMED_PUBLIC`: Valid public booking armed. Camera source read enabled for stage-wide preview, but countdown does not advance and live tracking does not engage.
+   - `LIVE_PUBLIC`: Host explicitly confirms set start (`start_set(host_confirmed=True)`). Stage timer advances, active 16:9 framing follows performer, natural cues emit.
+   - `BLANK_PUBLIC_OUTPUT`: Operator triggers output blanking. Solid black raster rendered to conceal broadcast output, but stream encoding stays connected.
+   - `STOPPED`: Session revoked, emergency stop, or private booking. Hard cut: `can_read_source = False` (0 source reads), `can_write_media = False` (0 sink writes, encoder closed immediately).
+2. **Permission Predicates**:
+   - `can_read_source`: Only true during `ARMED_PUBLIC`, `LIVE_PUBLIC`, or `BLANK_PUBLIC_OUTPUT`.
+   - `can_write_media`: Only true during `ARMED_PUBLIC`, `LIVE_PUBLIC`, or `BLANK_PUBLIC_OUTPUT`.
+   - Private bookings fail closed immediately to `STOPPED` with 0 source reads and 0 sink writes.
+3. **Dual-Stream FFprobe Packet Verification**:
+   - Inspects both video and audio streams independently using FFprobe.
+   - Verified that video duration (65.000s) and audio duration (65.002s) are synchronized within **14.67 ms** at stream end ($|t_v - t_a| < 50\text{ ms}$).
+   - Verified both streams are 100% monotonic with zero packet jitter.
+   - Validated complete container decode integrity (`ffmpeg -v error -i ... -f null -`).
+4. **Physical Benchmark Execution (`run_milestone7_validation.py`)**:
+   - 75-second real-time paced scenario on NVIDIA Jetson Orin Nano 8GB (`joejetson1.local`).
+   - Host confirmed set start at $t=3.0\text{s}$ (pre-start held in safe-wide).
+   - Natural `warn_15` cue at $t=38.0\text{s}$ (15s remaining of 50s booking).
+   - Natural `time_up` cue at $t=53.0\text{s}$ (0s remaining, switched to safe-wide).
+   - Revoked consent at $t=65.0\text{s}$: 1950 frames authorized, 300 post-revoke frames dropped (strictly 0 reads, 0 writes).
+   - Live production service `box2_stream.py` PID 266619 remained completely uninterrupted (24+ days uptime, 91 restarts before/after).
 
 ## Integration steps only after read-only audits
 

@@ -30,6 +30,7 @@ class OBSProposal:
     cue: Optional[str] = None
     remaining_seconds: Optional[int] = None
     reason: str = ""
+    capture_lifecycle: str = "no_input"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

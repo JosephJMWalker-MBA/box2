@@ -31,6 +31,19 @@ class Cue(str, Enum):
     TIME_UP = "time_up"
 
 
+class CaptureLifecycle(str, Enum):
+    """Explicit media acquisition and recording lifecycle states.
+
+    Separates public broadcast presentation/concealment from physical media acquisition
+    and disk/network recording permissions.
+    """
+    NO_INPUT = "no_input"                        # Initial unconfigured state, private session, or missing permission
+    ARMED_PUBLIC = "armed_public"                # Consented public booking armed, awaiting host start
+    LIVE_PUBLIC = "live_public"                  # Host confirmed, set active, capturing, framing, and recording
+    BLANK_PUBLIC_OUTPUT = "blank_public_output"  # Temporary broadcast conceal/blank (e.g. emergency hold), media sink receives blank
+    STOPPED = "stopped"                          # Session stopped, revoked, or private session: 0 reads, 0 writes
+
+
 def _require_utc(value: datetime, label: str) -> None:
     if value.tzinfo is None or value.utcoffset() != timedelta(0):
         raise ValueError(f"{label} must be timezone-aware UTC")
@@ -77,6 +90,7 @@ class Decision:
     cue: Optional[Cue] = None
     remaining_seconds: Optional[int] = None
     reason: str = ""
+    capture_lifecycle: CaptureLifecycle = CaptureLifecycle.NO_INPUT
 
 
 class StageDirector:
@@ -89,17 +103,56 @@ class StageDirector:
     def __init__(self) -> None:
         self._booking: Optional[BookingSnapshot] = None
         self.mode = Mode.OFF
+        self.capture_lifecycle = CaptureLifecycle.NO_INPUT
         self._started_monotonic: Optional[float] = None
         self._last_monotonic: Optional[float] = None
         self._previous_remaining: Optional[float] = None
 
+    @property
+    def can_read_source(self) -> bool:
+        """True only when authorized to acquire camera/audio hardware frames."""
+        return self.capture_lifecycle in (
+            CaptureLifecycle.ARMED_PUBLIC,
+            CaptureLifecycle.LIVE_PUBLIC,
+            CaptureLifecycle.BLANK_PUBLIC_OUTPUT,
+        )
+
+    @property
+    def can_write_media(self) -> bool:
+        """True only when authorized to emit encoded media to disk or stream."""
+        return self.capture_lifecycle in (
+            CaptureLifecycle.ARMED_PUBLIC,
+            CaptureLifecycle.LIVE_PUBLIC,
+            CaptureLifecycle.BLANK_PUBLIC_OUTPUT,
+        )
+
     def stop(self, reason: str = "operator_stop") -> Decision:
         self._booking = None
         self.mode = Mode.OFF
+        self.capture_lifecycle = CaptureLifecycle.STOPPED
         self._started_monotonic = None
         self._last_monotonic = None
         self._previous_remaining = None
-        return Decision(Mode.OFF, CameraAction.CAPTURE_OFF, reason=reason)
+        return Decision(
+            Mode.OFF,
+            CameraAction.CAPTURE_OFF,
+            reason=reason,
+            capture_lifecycle=CaptureLifecycle.STOPPED,
+        )
+
+    def blank_output(self, reason: str = "operator_blank") -> Decision:
+        """Blank the public video output while maintaining stream container continuity."""
+        if self.mode == Mode.LIVE:
+            self.capture_lifecycle = CaptureLifecycle.BLANK_PUBLIC_OUTPUT
+        return self._current_decision(reason)
+
+    def restore_output(self) -> Decision:
+        """Restore active broadcast video output after a temporary blanking."""
+        if self.capture_lifecycle == CaptureLifecycle.BLANK_PUBLIC_OUTPUT:
+            self.capture_lifecycle = (
+                CaptureLifecycle.LIVE_PUBLIC if self.mode == Mode.LIVE else CaptureLifecycle.ARMED_PUBLIC
+            )
+        return self._current_decision("output_restored")
 
     @staticmethod
     def _authorization_error(booking: BookingSnapshot, now_utc: datetime) -> str:
@@ -127,8 +180,13 @@ class StageDirector:
         self.stop()
         self._booking = booking
         self.mode = Mode.ARMED
-        return Decision(Mode.ARMED, CameraAction.STAGE_WIDE,
-                        reason="awaiting_host_confirmed_start")
+        self.capture_lifecycle = CaptureLifecycle.ARMED_PUBLIC
+        return Decision(
+            Mode.ARMED,
+            CameraAction.STAGE_WIDE,
+            reason="awaiting_host_confirmed_start",
+            capture_lifecycle=self.capture_lifecycle,
+        )
 
     def refresh(self, booking: BookingSnapshot, now_utc: datetime) -> Decision:
         """Treat identity changes, rollback, or revoked rights as a stop."""
@@ -155,21 +213,30 @@ class StageDirector:
         if now_utc < self._booking.slot_start_utc:
             return self._current_decision("slot_not_started")
         self.mode = Mode.LIVE
+        self.capture_lifecycle = CaptureLifecycle.LIVE_PUBLIC
         self._started_monotonic = monotonic_seconds
         self._last_monotonic = monotonic_seconds
         self._previous_remaining = min(
             float(self._booking.stage_seconds),
             (self._booking.slot_end_utc - now_utc).total_seconds(),
         )
-        return Decision(Mode.LIVE, CameraAction.TRACK_FACE,
-                        remaining_seconds=ceil(self._previous_remaining),
-                        reason="host_confirmed_set_start")
+        return Decision(
+            Mode.LIVE,
+            CameraAction.TRACK_FACE,
+            remaining_seconds=ceil(self._previous_remaining),
+            reason="host_confirmed_set_start",
+            capture_lifecycle=self.capture_lifecycle,
+        )
 
     def tick(self, now_utc: datetime, monotonic_seconds: float) -> Decision:
         _require_utc(now_utc, "now_utc")
         if self._booking is None or self.mode == Mode.OFF:
-            return Decision(Mode.OFF, CameraAction.CAPTURE_OFF,
-                            reason="not_armed")
+            return Decision(
+                Mode.OFF,
+                CameraAction.CAPTURE_OFF,
+                reason="not_armed",
+                capture_lifecycle=self.capture_lifecycle,
+            )
         error = self._authorization_error(self._booking, now_utc)
         # A confirmed live set must emit its end cue at the slot boundary.
         # After that one cue, the following tick fails closed as expired.
@@ -191,8 +258,14 @@ class StageDirector:
         self._previous_remaining = remaining
         if remaining <= 0:
             self.mode = Mode.FINISHED
-            return Decision(Mode.FINISHED, CameraAction.STAGE_WIDE,
-                            Cue.TIME_UP, remaining_seconds=0)
+            self.capture_lifecycle = CaptureLifecycle.ARMED_PUBLIC
+            return Decision(
+                Mode.FINISHED,
+                CameraAction.STAGE_WIDE,
+                Cue.TIME_UP,
+                remaining_seconds=0,
+                capture_lifecycle=self.capture_lifecycle,
+            )
         # On a delayed tick, emit only the most urgent cue; never replay cues.
         if previous is not None and previous > 15 >= remaining:
             cue = Cue.WARN_15
@@ -200,16 +273,31 @@ class StageDirector:
             cue = Cue.WARN_60
         else:
             cue = None
-        return Decision(Mode.LIVE, CameraAction.TRACK_FACE,
-                        cue, remaining_seconds=ceil(remaining))
+        return Decision(
+            Mode.LIVE,
+            CameraAction.TRACK_FACE,
+            cue,
+            remaining_seconds=ceil(remaining),
+            capture_lifecycle=self.capture_lifecycle,
+        )
 
     def _current_decision(self, reason: str) -> Decision:
         if self.mode == Mode.OFF:
-            return Decision(Mode.OFF, CameraAction.CAPTURE_OFF, reason=reason)
+            return Decision(
+                Mode.OFF,
+                CameraAction.CAPTURE_OFF,
+                reason=reason,
+                capture_lifecycle=self.capture_lifecycle,
+            )
         action = (CameraAction.TRACK_FACE if self.mode == Mode.LIVE
                   else CameraAction.STAGE_WIDE)
         remaining = (ceil(self._previous_remaining)
                      if self.mode == Mode.LIVE and
                      self._previous_remaining is not None else None)
-        return Decision(self.mode, action, remaining_seconds=remaining,
-                        reason=reason)
+        return Decision(
+            self.mode,
+            action,
+            remaining_seconds=remaining,
+            reason=reason,
+            capture_lifecycle=self.capture_lifecycle,
+        )

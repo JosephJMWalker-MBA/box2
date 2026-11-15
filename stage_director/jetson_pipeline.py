@@ -1,19 +1,24 @@
-"""Jetson-Native Autonomous Frame Pipeline for Stage Director.
+"""Jetson-Native Autonomous Frame Pipeline for Stage Director (Milestone 7).
 
 Integrates the StageFramingAdapter state engine with local media decoding,
-dynamic 16:9 crop and scale transformations, and software H.264/AAC encoding.
-Designed to run autonomously on NVIDIA Jetson Orin Nano without Mac OBS dependency.
+dynamic 16:9 crop and scale transformations, strict capture lifecycle gating,
+and software H.264/AAC encoding.
 
 Guarantees:
-- Output is strictly 1920x1080 @ 30.0 FPS.
-- Zero network egress: writes to a local sandboxed file or pipe.
-- Fail-closed safety: emergency stop, revoked consent, or tracking loss drops to safe wide or capture_off.
-- Pure standard library + NumPy + OpenCV/GStreamer (no external network dependencies).
+- Output is strictly 1920x1080 @ 30.0 FPS with synchronized AAC 48 kHz stereo audio.
+- Strict capture lifecycle separation:
+  * NO_INPUT / STOPPED: zero source reads, zero media writes.
+  * BLANK_PUBLIC_OUTPUT: broadcast concealment (black frames) while preserving stream continuity.
+  * ARMED_PUBLIC: safe wide preview, set not started.
+  * LIVE_PUBLIC: host-confirmed performance, active tracking and media encoding.
+- Zero network egress: writes to a local sandboxed file.
+- Pure standard library + NumPy + OpenCV (no external network dependencies).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 import hashlib
 import json
 import math
@@ -32,10 +37,30 @@ except ImportError:
     HAS_CV2_NUMPY = False
 
 from .adapter import StageFramingAdapter
-from .core import BookingSnapshot, CameraAction, Mode
+from .core import BookingSnapshot, CameraAction, CaptureLifecycle, Mode
 from .framing import FramingConfig
 from .geometry import BoundingBox, StagePolygon
 from .obs_transform import OBSProposal
+
+
+@dataclass(frozen=True)
+class AuditLogEvent:
+    """Auditable state machine event recording lifecycle, cues, and media call counts."""
+    event_index: int
+    timestamp_utc: str
+    monotonic_seconds: float
+    event_type: str
+    capture_lifecycle: str
+    camera_action: str
+    remaining_seconds: Optional[int]
+    cue: Optional[str]
+    source_reads_count: int
+    sink_writes_count: int
+    broadcast_audio_silent: bool
+    details: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass
@@ -44,6 +69,7 @@ class PipelineFrameMetrics:
     timestamp_utc: str
     monotonic_seconds: float
     mode: str
+    capture_lifecycle: str
     camera_action: str
     crop: Dict[str, int]
     zoom_factor: float
@@ -63,6 +89,12 @@ class PipelineSummary:
     sha256_hash: str
     pts_monotonic: bool
     max_pts_jitter_ms: float
+    capture_lifecycle: str
+    source_reads_count: int
+    sink_writes_count: int
+    dropped_unauthorized_reads: int
+    dropped_unauthorized_writes: int
+    event_log: List[Dict[str, Any]] = field(default_factory=list)
     transition_stills: Dict[str, str] = field(default_factory=dict)
 
 
@@ -95,13 +127,32 @@ class JetsonFramePipeline:
         )
 
         self.metrics: List[PipelineFrameMetrics] = []
+        self.event_log: List[AuditLogEvent] = []
         self._emergency_stop_triggered = False
+        self._blank_output_triggered = False
 
-    def trigger_emergency_stop(self) -> None:
-        """Trigger an immediate fail-closed emergency stop."""
+        self.source_reads_count = 0
+        self.sink_writes_count = 0
+        self.dropped_unauthorized_reads = 0
+        self.dropped_unauthorized_writes = 0
+
+    def trigger_emergency_stop(self, reason: str = "operator_emergency_stop") -> None:
+        """Trigger an immediate fail-closed emergency stop (0 subsequent reads/writes)."""
         self._emergency_stop_triggered = True
         if hasattr(self, "adapter") and self.adapter and hasattr(self.adapter, "director"):
-            self.adapter.director.stop("operator_emergency_stop")
+            self.adapter.director.stop(reason)
+
+    def trigger_blank_output(self, reason: str = "operator_blank") -> None:
+        """Conceal public broadcast output (solid black) while keeping stream alive."""
+        self._blank_output_triggered = True
+        if hasattr(self, "adapter") and self.adapter and hasattr(self.adapter, "director"):
+            self.adapter.director.blank_output(reason)
+
+    def restore_output(self) -> None:
+        """Restore active broadcast video output after temporary blanking."""
+        self._blank_output_triggered = False
+        if hasattr(self, "adapter") and self.adapter and hasattr(self.adapter, "director"):
+            self.adapter.director.restore_output()
 
     def calculate_crop_slice(
         self,
@@ -122,7 +173,6 @@ class JetsonFramePipeline:
         x2 = self.source_width - crop_r
         y2 = self.source_height - crop_b
 
-        # Ensure valid 16:9 box
         w = max(16, x2 - x1)
         h = max(9, y2 - y1)
         return (x1, y1, x1 + w, y1 + h)
@@ -134,22 +184,29 @@ class JetsonFramePipeline:
     ) -> np.ndarray:
         """Crop and resize a frame (BGR or YUV420) to exact broadcast dimensions.
 
-        If mode is capture_off or emergency stop triggered, returns a solid black frame.
+        If mode is capture_off, emergency stop, or blank_output, returns a solid black frame.
         """
         if not HAS_CV2_NUMPY:
             raise RuntimeError("OpenCV and NumPy are required for frame scaling.")
-        if self._emergency_stop_triggered or proposal.camera_action == "capture_off":
+
+        is_blank = (
+            self._emergency_stop_triggered
+            or self._blank_output_triggered
+            or proposal.camera_action == "capture_off"
+            or proposal.capture_lifecycle == CaptureLifecycle.BLANK_PUBLIC_OUTPUT.value
+            or proposal.capture_lifecycle == CaptureLifecycle.STOPPED.value
+        )
+
+        if is_blank:
             if len(frame.shape) == 3:
                 return np.zeros((self.output_height, self.output_width, frame.shape[2]), dtype=np.uint8)
             else:
                 return np.zeros((self.output_height * 3 // 2, self.output_width), dtype=np.uint8)
 
         if proposal.camera_action == "stage_wide" or proposal.obs_crop is None:
-            # Full source safe-wide scaled to output canvas
             if len(frame.shape) == 3:
                 return cv2.resize(frame, (self.output_width, self.output_height), interpolation=cv2.INTER_LINEAR)
             else:
-                # Direct YUV420 plane scaling
                 h, w = self.source_height, self.source_width
                 y_p = frame[:h, :w]
                 u_p = frame[h : h + h // 4, :w].reshape((h // 2, w // 2))
@@ -167,7 +224,6 @@ class JetsonFramePipeline:
             cropped = frame[y1:y2, x1:x2]
             return cv2.resize(cropped, (self.output_width, self.output_height), interpolation=cv2.INTER_LINEAR)
         else:
-            # Direct YUV420 plane slicing and scaling
             h, w = self.source_height, self.source_width
             y_p = frame[:h, :w]
             u_p = frame[h : h + h // 4, :w].reshape((h // 2, w // 2))
@@ -187,21 +243,26 @@ class JetsonFramePipeline:
         timeline_events: Sequence[Tuple[float, List[BoundingBox], Optional[str]]],
         output_mp4_path: str,
         frame_generator: Optional[Callable[[int, float], np.ndarray]] = None,
+        booking: Optional[BookingSnapshot] = None,
         bitrate_kbps: int = 4500,
         preset: str = "veryfast",
         realtime_pacing: bool = False,
     ) -> PipelineSummary:
         """Execute a deterministic, scripted framing run and encode to local MP4.
 
-        Each timeline event is: (elapsed_seconds, detected_faces, optional_operator_command).
-        Supported commands:
+        Supported timeline commands:
+          - "host_start": host explicitly confirms and starts the set
           - "confirm_first": confirms detected_faces[0]
           - "switch_second": switches to detected_faces[1]
-          - "emergency_stop": triggers emergency stop
+          - "blank_output": conceals broadcast output (solid black)
+          - "restore_output": restores active broadcast output
+          - "revoke_consent": revokes consent, transitioning to STOPPED (0 reads, 0 writes)
+          - "private_session": switches to private session, transitioning to STOPPED (0 reads, 0 writes)
+          - "emergency_stop": triggers emergency stop, transitioning to STOPPED (0 reads, 0 writes)
         """
         if not HAS_CV2_NUMPY:
             raise RuntimeError("OpenCV and NumPy are required for offline simulation.")
-        # Ensure output directory exists
+
         os.makedirs(os.path.dirname(os.path.abspath(output_mp4_path)), exist_ok=True)
         if os.path.exists(output_mp4_path):
             os.remove(output_mp4_path)
@@ -209,14 +270,15 @@ class JetsonFramePipeline:
         start_time_utc = datetime(2026, 11, 10, 0, 0, tzinfo=timezone.utc)
         base_monotonic = 1000.0
 
-        booking = BookingSnapshot(
-            booking_id="milestone6-jetson-offline-proof",
+        # Default booking for test: 50-second stage duration so cues naturally fire within a 65-75s test
+        active_booking = booking or BookingSnapshot(
+            booking_id="milestone7-jetson-offline-proof",
             revision=1,
             slot_start_utc=start_time_utc,
             slot_end_utc=start_time_utc + timedelta(minutes=15),
             issued_at_utc=start_time_utc - timedelta(seconds=30),
             expires_at_utc=start_time_utc + timedelta(minutes=16),
-            stage_seconds=900,
+            stage_seconds=50,
             privacy_class="public",
             checked_in=True,
             live_consent=True,
@@ -224,8 +286,16 @@ class JetsonFramePipeline:
             capture_verified=True,
         )
 
-        self.adapter.arm(booking, start_time_utc)
-        self.adapter.start_set(start_time_utc, base_monotonic, host_confirmed=True)
+        # Arm the performance (starts in ARMED_PUBLIC; set is NOT yet started)
+        self.adapter.arm(active_booking, start_time_utc)
+
+        # Reset counters
+        self.source_reads_count = 0
+        self.sink_writes_count = 0
+        self.dropped_unauthorized_reads = 0
+        self.dropped_unauthorized_writes = 0
+        self.metrics.clear()
+        self.event_log.clear()
 
         # Launch FFmpeg pipe encoder
         enc_cmd = [
@@ -248,6 +318,7 @@ class JetsonFramePipeline:
             "-ar", "48000",
             "-ac", "2",
             "-shortest",
+            "-max_interleave_delta", "50000",
             "-movflags", "+faststart",
             output_mp4_path,
         ]
@@ -257,59 +328,150 @@ class JetsonFramePipeline:
         wall_start = time.perf_counter()
 
         transition_stills: Dict[str, str] = {}
+        prev_mode = self.adapter.director.mode.value
+        prev_lifecycle = self.adapter.director.capture_lifecycle.value
 
         for idx, (elapsed_s, faces, cmd) in enumerate(timeline_events):
             t_loop_start = time.perf_counter()
             cur_mono = base_monotonic + elapsed_s
             cur_utc = start_time_utc + timedelta(seconds=elapsed_s)
 
-            # Handle operator command
-            if cmd == "confirm_first" and faces:
+            # Process operator command
+            if cmd == "host_start":
+                self.adapter.start_set(cur_utc, cur_mono, host_confirmed=True)
+                self.event_log.append(
+                    AuditLogEvent(
+                        event_index=len(self.event_log),
+                        timestamp_utc=cur_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        monotonic_seconds=cur_mono,
+                        event_type="host_confirmed_start",
+                        capture_lifecycle=self.adapter.director.capture_lifecycle.value,
+                        camera_action=self.adapter.director.mode.value,
+                        remaining_seconds=int(active_booking.stage_seconds),
+                        cue=None,
+                        source_reads_count=self.source_reads_count,
+                        sink_writes_count=self.sink_writes_count,
+                        broadcast_audio_silent=True,
+                        details="Host explicitly confirmed set start.",
+                    )
+                )
+            elif cmd in ("confirm_first", "confirm_subject") and faces:
                 self.adapter.confirm_subject(faces[0], cur_mono)
-            elif cmd == "switch_second" and len(faces) > 1:
+            elif cmd in ("switch_second", "switch_subject") and len(faces) > 1:
                 self.adapter.switch_subject(faces[1], cur_mono)
+            elif cmd == "blank_output":
+                self.trigger_blank_output("operator_blank")
+            elif cmd == "restore_output":
+                self.restore_output()
+            elif cmd in ("revoke_consent", "private_session"):
+                self.adapter.director.stop(cmd)
+                self.event_log.append(
+                    AuditLogEvent(
+                        event_index=len(self.event_log),
+                        timestamp_utc=cur_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        monotonic_seconds=cur_mono,
+                        event_type="media_shutdown",
+                        capture_lifecycle=self.adapter.director.capture_lifecycle.value,
+                        camera_action="capture_off",
+                        remaining_seconds=None,
+                        cue=None,
+                        source_reads_count=self.source_reads_count,
+                        sink_writes_count=self.sink_writes_count,
+                        broadcast_audio_silent=True,
+                        details=f"Media input/output stopped due to {cmd}.",
+                    )
+                )
             elif cmd == "emergency_stop":
                 self.trigger_emergency_stop()
 
-            # Tick StageFramingAdapter
+            # Tick Stage Director state machine
             proposal = self.adapter.process_frame(
                 detections=faces,
                 now_utc=cur_utc,
                 monotonic_seconds=cur_mono,
             )
 
-            # Generate frame canvas
-            if frame_generator:
-                src_frame = frame_generator(idx, elapsed_s)
-            else:
-                src_frame = np.zeros((self.source_height, self.source_width, 3), dtype=np.uint8)
-                # Render stage guideline
-                cv2.rectangle(src_frame, (384, 216), (3456, 1944), (40, 40, 40), 4)
-                # Render detected faces
-                for f in faces:
-                    cv2.rectangle(
-                        src_frame,
-                        (int(f.x), int(f.y)),
-                        (int(f.x + f.width), int(f.y + f.height)),
-                        (0, 255, 0),
-                        -1,
+            # Record cue events
+            if proposal.cue:
+                self.event_log.append(
+                    AuditLogEvent(
+                        event_index=len(self.event_log),
+                        timestamp_utc=cur_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        monotonic_seconds=cur_mono,
+                        event_type=f"cue_{proposal.cue}",
+                        capture_lifecycle=self.adapter.director.capture_lifecycle.value,
+                        camera_action=proposal.camera_action,
+                        remaining_seconds=proposal.remaining_seconds,
+                        cue=proposal.cue,
+                        source_reads_count=self.source_reads_count,
+                        sink_writes_count=self.sink_writes_count,
+                        broadcast_audio_silent=True,
+                        details=f"Performance countdown cue {proposal.cue} fired naturally.",
                     )
-
-            # Crop and scale to 1920x1080 broadcast canvas
-            framed_canvas = self.crop_and_scale_frame(src_frame, proposal)
-
-            # Capture transition stills at significant moments
-            if cmd or proposal.events or (idx in (5, 30, 90, 150, 210)):
-                label = cmd or (proposal.events[0] if proposal.events else f"step_{idx}")
-                still_path = os.path.join(
-                    os.path.dirname(output_mp4_path), f"still_{label}_{idx:04d}.png"
                 )
-                if not os.path.exists(still_path):
-                    cv2.imwrite(still_path, framed_canvas)
-                    transition_stills[f"{label}_frame{idx}"] = still_path
 
-            # Write to encoder pipe
-            enc_proc.stdin.write(framed_canvas.tobytes())
+            # Record mode/lifecycle transitions
+            cur_lifecycle = self.adapter.director.capture_lifecycle.value
+            if cur_lifecycle != prev_lifecycle:
+                self.event_log.append(
+                    AuditLogEvent(
+                        event_index=len(self.event_log),
+                        timestamp_utc=cur_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        monotonic_seconds=cur_mono,
+                        event_type=f"lifecycle_transition_to_{cur_lifecycle}",
+                        capture_lifecycle=cur_lifecycle,
+                        camera_action=proposal.camera_action,
+                        remaining_seconds=proposal.remaining_seconds,
+                        cue=proposal.cue,
+                        source_reads_count=self.source_reads_count,
+                        sink_writes_count=self.sink_writes_count,
+                        broadcast_audio_silent=True,
+                        details=f"Capture lifecycle changed from {prev_lifecycle} to {cur_lifecycle}.",
+                    )
+                )
+                prev_lifecycle = cur_lifecycle
+
+            # STRICT CAPTURE PERMISSION GATE
+            if not self.adapter.director.can_read_source:
+                self.dropped_unauthorized_reads += 1
+                src_frame = None
+            else:
+                self.source_reads_count += 1
+                if frame_generator:
+                    src_frame = frame_generator(idx, elapsed_s)
+                else:
+                    src_frame = np.zeros((self.source_height, self.source_width, 3), dtype=np.uint8)
+                    cv2.rectangle(src_frame, (384, 216), (3456, 1944), (40, 40, 40), 4)
+                    for f in faces:
+                        cv2.rectangle(
+                            src_frame,
+                            (int(f.x), int(f.y)),
+                            (int(f.x + f.width), int(f.y + f.height)),
+                            (0, 255, 0),
+                            -1,
+                        )
+
+            # STRICT SINK WRITE PERMISSION GATE
+            if not self.adapter.director.can_write_media:
+                self.dropped_unauthorized_writes += 1
+                # If encoder pipe is still open, close it immediately upon shutdown
+                if enc_proc.stdin and not enc_proc.stdin.closed:
+                    enc_proc.stdin.close()
+            else:
+                if src_frame is not None and enc_proc.stdin and not enc_proc.stdin.closed:
+                    framed_canvas = self.crop_and_scale_frame(src_frame, proposal)
+                    enc_proc.stdin.write(framed_canvas.tobytes())
+                    self.sink_writes_count += 1
+
+                    # Transition stills
+                    if cmd or proposal.cue or (idx in (15, 60, 300, 700, 1100, 1300, 1400, 1600, 1850, 2050)):
+                        label = cmd or proposal.cue or f"step_{idx}"
+                        still_path = os.path.join(
+                            os.path.dirname(output_mp4_path), f"still_{label}_{idx:04d}.png"
+                        )
+                        if not os.path.exists(still_path):
+                            cv2.imwrite(still_path, framed_canvas)
+                            transition_stills[f"{label}_frame{idx}"] = still_path
 
             # Log metrics
             crop_dict = proposal.obs_crop or {"left": 0, "top": 0, "right": 0, "bottom": 0}
@@ -323,6 +485,7 @@ class JetsonFramePipeline:
                     timestamp_utc=cur_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
                     monotonic_seconds=cur_mono,
                     mode="off" if self._emergency_stop_triggered else proposal.mode,
+                    capture_lifecycle=self.adapter.director.capture_lifecycle.value,
                     camera_action="capture_off" if self._emergency_stop_triggered else proposal.camera_action,
                     crop=crop_dict,
                     zoom_factor=float(framing_dict.get("zoom_factor", 1.0)),
@@ -338,9 +501,35 @@ class JetsonFramePipeline:
                 if sleep_s > 0:
                     time.sleep(sleep_s)
 
-        enc_proc.stdin.close()
+        if enc_proc.stdin and not enc_proc.stdin.closed:
+            enc_proc.stdin.close()
         enc_proc.wait()
         total_wall_s = time.perf_counter() - wall_start
+
+        # Align container audio duration precisely with video duration if frames were written
+        if self.sink_writes_count > 0 and os.path.exists(output_mp4_path) and os.path.getsize(output_mp4_path) > 1024:
+            exact_duration_s = self.sink_writes_count / float(self.target_fps)
+            aligned_tmp_path = output_mp4_path + ".aligned.mp4"
+            remux_cmd = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-i", output_mp4_path,
+                "-to", f"{exact_duration_s:.4f}",
+                "-c", "copy",
+                "-movflags", "+faststart",
+                aligned_tmp_path,
+            ]
+            try:
+                ret = subprocess.call(remux_cmd)
+                if ret == 0 and os.path.exists(aligned_tmp_path) and os.path.getsize(aligned_tmp_path) > 0:
+                    os.replace(aligned_tmp_path, output_mp4_path)
+            except Exception:
+                pass
+            finally:
+                if os.path.exists(aligned_tmp_path):
+                    try:
+                        os.remove(aligned_tmp_path)
+                    except OSError:
+                        pass
 
         # Compute output file verification & SHA-256
         file_size = os.path.getsize(output_mp4_path) if os.path.exists(output_mp4_path) else 0
@@ -367,5 +556,11 @@ class JetsonFramePipeline:
             sha256_hash=digest,
             pts_monotonic=is_monotonic,
             max_pts_jitter_ms=round(max_jitter_ms, 3),
+            capture_lifecycle=self.adapter.director.capture_lifecycle.value,
+            source_reads_count=self.source_reads_count,
+            sink_writes_count=self.sink_writes_count,
+            dropped_unauthorized_reads=self.dropped_unauthorized_reads,
+            dropped_unauthorized_writes=self.dropped_unauthorized_writes,
+            event_log=[e.to_dict() for e in self.event_log],
             transition_stills=transition_stills,
         )
