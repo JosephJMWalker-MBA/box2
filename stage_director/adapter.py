@@ -29,7 +29,9 @@ class StageFramingAdapter:
                  director: Optional[StageDirector] = None,
                  tracker: Optional[PerformerTracker] = None,
                  framing_engine: Optional[FramingEngine] = None,
-                 config: Optional[FramingConfig] = None) -> None:
+                 config: Optional[FramingConfig] = None,
+                 *,
+                 allow_proximity_reacquisition: bool = False) -> None:
         self.config = config or FramingConfig()
         self.director = director or StageDirector()
         self.tracker = tracker or PerformerTracker(
@@ -37,6 +39,7 @@ class StageFramingAdapter:
                 self.config.canvas_width, self.config.canvas_height
             ),
             loss_hold_seconds=2.0,
+            allow_proximity_reacquisition=allow_proximity_reacquisition,
         )
         self.framing = framing_engine or FramingEngine(self.config)
         self._was_active = False
@@ -199,11 +202,13 @@ class StageFramingAdapter:
             window = self.framing.update(None, monotonic_seconds)
             subject_lost = (track_res.state == TrackingState.LOST)
 
+        combined_events = list(track_res.events) + self.framing.pop_events()
+
         return self._make_proposal(
             decision=decision,
             tracking_state=track_res.state,
             subject_lost=subject_lost,
-            events=track_res.events,
+            events=combined_events,
             now_utc=now_utc,
             monotonic_seconds=monotonic_seconds,
             window=window,

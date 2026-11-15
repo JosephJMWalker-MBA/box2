@@ -113,6 +113,58 @@ class TrackingTests(unittest.TestCase):
         # Active subject remains guest
         self.assertEqual(self.tracker.active_subject, guest)
 
+    def test_proximity_reacquisition_enabled_single_onstage_reacquires(self):
+        """When allow_proximity_reacquisition=True, single performer returning on stage auto-reacquires."""
+        auto_tracker = PerformerTracker(
+            self.stage,
+            loss_hold_seconds=2.0,
+            allow_proximity_reacquisition=True,
+        )
+        auto_tracker.enable()
+
+        performer = BoundingBox(x=1900, y=800, width=120, height=150)
+        auto_tracker.update([performer], monotonic_seconds=10.0)
+        self.assertEqual(auto_tracker.state, TrackingState.TRACKING)
+
+        # Extended loss (> 2.0s)
+        auto_tracker.update([], monotonic_seconds=13.0)
+        self.assertEqual(auto_tracker.state, TrackingState.LOST)
+
+        # Performer reappears alone on stage (mic lowered or turned back)
+        returned = BoundingBox(x=1950, y=800, width=120, height=150)
+        res = auto_tracker.update([returned], monotonic_seconds=14.0)
+
+        # Reacquires without needing manual operator confirmation!
+        self.assertEqual(res.state, TrackingState.TRACKING)
+        self.assertEqual(res.active_subject, returned)
+        self.assertIn("camera_subject_reacquired", res.events)
+
+    def test_proximity_reacquisition_enabled_multiple_onstage_ambiguity(self):
+        """When allow_proximity_reacquisition=True, multiple candidates outside proximity stay ambiguous."""
+        auto_tracker = PerformerTracker(
+            self.stage,
+            loss_hold_seconds=2.0,
+            allow_proximity_reacquisition=True,
+        )
+        auto_tracker.enable()
+
+        performer = BoundingBox(x=1000, y=800, width=120, height=150)
+        auto_tracker.update([performer], monotonic_seconds=10.0)
+
+        # Extended loss
+        auto_tracker.update([], monotonic_seconds=13.0)
+        self.assertEqual(auto_tracker.state, TrackingState.LOST)
+
+        # Two strangers appear far away on stage right (x=2800 and x=3000)
+        stranger1 = BoundingBox(x=2800, y=800, width=120, height=150)
+        stranger2 = BoundingBox(x=3000, y=800, width=120, height=150)
+        res = auto_tracker.update([stranger1, stranger2], monotonic_seconds=14.0)
+
+        # Neither matches proximity; stays ambiguous and requires host confirmation
+        self.assertEqual(res.state, TrackingState.AMBIGUOUS)
+        self.assertIsNone(res.active_subject)
+        self.assertIn("performer_confirmation_required", res.events)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,3 +3,6 @@ __pycache__/
 *$py.class
 .pytest_cache/
 .DS_Store
+tools/jetson/*.jpg
+tools/jetson/*.mp4
+tools/jetson/stills_v2/

@@ -237,8 +237,16 @@ class PerformerTracker:
                             b for b in onstage_boxes
                             if b.distance_to(self._held_subject) <= reacquire_radius
                         ]
-                        if len(matches) == 1 and len(onstage_boxes) == 1:
+                        # Safe reacquisition criteria:
+                        # 1. Exactly one solitary performer on stage rug (cannot steal from anyone else)
+                        # 2. Or multiple on stage, but exactly one matches proximity to the held performer
+                        chosen = None
+                        if len(onstage_boxes) == 1:
+                            chosen = onstage_boxes[0]
+                        elif len(matches) == 1:
                             chosen = matches[0]
+
+                        if chosen is not None:
                             self.active_subject = chosen
                             self._held_subject = chosen
                             self._last_seen_monotonic = monotonic_seconds

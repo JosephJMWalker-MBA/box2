@@ -122,6 +122,104 @@ class FramingTests(unittest.TestCase):
         self.assertGreater(visible_h, 0)
         self.assertAlmostEqual(visible_w / visible_h, 16.0 / 9.0, delta=0.02)
 
+    def test_head_and_shoulders_close_up_aspect_and_headroom(self):
+        """Default FramingConfig produces classic head-and-shoulders composition."""
+        default_config = FramingConfig()
+        self.assertEqual(default_config.target_face_fraction, 0.33)
+        self.assertEqual(default_config.max_zoom, 3.6)
+
+        engine = FramingEngine(default_config)
+        face = BoundingBox(x=1820.0, y=680.0, width=200.0, height=240.0)
+        target = engine.compute_target_window(face)
+
+        # Height should be face_height / 0.33 = ~727px
+        self.assertAlmostEqual(target.height, 240.0 / 0.33, delta=2.0)
+        self.assertAlmostEqual(target.width, target.height * (16.0 / 9.0), delta=2.0)
+        # Face center fraction from crop top should be ~0.33 (headroom)
+        offset = face.center_y - target.top
+        self.assertAlmostEqual(offset / target.height, 0.33, places=2)
+
+    def test_periodic_room_view_cadence(self):
+        """Periodic room view establishes wide shot every interval and returns to close-up."""
+        config = FramingConfig(
+            canvas_width=3840,
+            canvas_height=2160,
+            target_face_fraction=0.33,
+            max_zoom=3.6,
+            periodic_room_view_enabled=True,
+            room_view_interval_s=45.0,
+            room_view_duration_s=5.0,
+        )
+        engine = FramingEngine(config)
+        face = BoundingBox(x=1820.0, y=680.0, width=200.0, height=240.0)
+
+        # Step through 40 seconds at 10 FPS
+        t = 0.0
+        w40 = engine.update(face, monotonic_seconds=t)
+        for _ in range(400):
+            t += 0.1
+            w40 = engine.update(face, monotonic_seconds=t)
+
+        # Camera has smoothly zoomed into performer close-up
+        self.assertGreater(w40.zoom_factor(3840), 2.5)
+        self.assertEqual(engine.pop_events(), [])
+
+        # Step past 45s (interval reached: starts room view)
+        while t < 45.2:
+            t += 0.1
+            engine.update(face, monotonic_seconds=t)
+
+        events = engine.pop_events()
+        self.assertIn("periodic_room_view_started", events)
+
+        # Target window during room view should be full wide (3840x2160)
+        target_during_wide = engine.compute_target_window(face, monotonic_seconds=t)
+        self.assertEqual(target_during_wide.width, 3840.0)
+        self.assertEqual(target_during_wide.height, 2160.0)
+
+        # Step past 50.2s (duration elapsed: ends room view)
+        while t < 50.4:
+            t += 0.1
+            engine.update(face, monotonic_seconds=t)
+
+        events50 = engine.pop_events()
+        self.assertIn("periodic_room_view_ended", events50)
+
+        # Next frame targets close-up again
+        target_after = engine.compute_target_window(face, monotonic_seconds=t + 0.1)
+        self.assertAlmostEqual(target_after.height, 240.0 / 0.33, delta=2.0)
+
+    def test_pacing_pullback_widens_during_rapid_movement(self):
+        """Rapid performer walking across stage pulls framing wider for breathing room."""
+        config = FramingConfig(
+            canvas_width=3840,
+            canvas_height=2160,
+            target_face_fraction=0.33,
+            max_zoom=3.6,
+            pacing_pullback_speed_threshold_px_s=300.0,
+            pacing_pullback_factor=0.50,
+        )
+        engine = FramingEngine(config)
+
+        # Standing still at x=1000
+        face_still = BoundingBox(x=900.0, y=680.0, width=200.0, height=240.0)
+        engine.update(face_still, monotonic_seconds=0.0)
+        engine.update(face_still, monotonic_seconds=0.1)
+        still_target = engine.compute_target_window(face_still)
+
+        # Sustained rapid walk: moves 60px every 0.05s = 1200 px/s over several frames
+        t = 0.15
+        cur_x = 900.0
+        for _ in range(5):
+            cur_x += 60.0
+            face_moving = BoundingBox(x=cur_x, y=680.0, width=200.0, height=240.0)
+            engine.update(face_moving, monotonic_seconds=t)
+            t += 0.05
+
+        moving_target = engine.compute_target_window(face_moving)
+        # Target window should be significantly wider to accommodate rapid pacing
+        self.assertGreater(moving_target.width, still_target.width * 1.15)
+
 
 if __name__ == "__main__":
     unittest.main()

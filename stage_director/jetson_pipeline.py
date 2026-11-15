@@ -121,9 +121,11 @@ class JetsonFramePipeline:
             config=FramingConfig(
                 canvas_width=source_width,
                 canvas_height=source_height,
-                target_face_fraction=0.20,
+                target_face_fraction=0.33,
                 headroom_fraction=0.33,
-            )
+                max_zoom=3.6,
+            ),
+            allow_proximity_reacquisition=True,
         )
 
         self.metrics: List[PipelineFrameMetrics] = []
