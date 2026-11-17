@@ -247,23 +247,24 @@ class DirectorStream:
         framing_config = FramingConfig(
             canvas_width=src_w,
             canvas_height=src_h,
-            target_face_fraction=cfg.get("target_face_fraction", 0.33),
-            max_zoom=cfg.get("max_zoom", 3.6),
-            periodic_room_view_enabled=cfg.get("periodic_room_view_enabled", True),
-            room_view_interval_s=cfg.get("room_view_interval_s", 45.0),
+            target_face_fraction=cfg.get("target_face_fraction", 0.28),
+            max_zoom=cfg.get("max_zoom", 2.6),
+            periodic_room_view_enabled=cfg.get("periodic_room_view_enabled", False),
+            room_view_interval_s=cfg.get("room_view_interval_s", 90.0),
             room_view_duration_s=cfg.get("room_view_duration_s", 5.0),
-            pacing_pullback_speed_threshold_px_s=cfg.get("pacing_pullback_speed_threshold_px_s", 250.0),
-            pacing_pullback_factor=cfg.get("pacing_pullback_factor", 0.50),
-            deadzone_x_px=cfg.get("deadzone_x_px", 10.0),
-            deadzone_y_px=cfg.get("deadzone_y_px", 8.0),
-            deadzone_zoom_px=cfg.get("deadzone_zoom_px", 15.0),
-            max_pan_speed_px_s=cfg.get("max_pan_speed_px_s", 400.0),
-            max_tilt_speed_px_s=cfg.get("max_tilt_speed_px_s", 300.0),
-            max_zoom_speed_px_s=cfg.get("max_zoom_speed_px_s", 250.0),
+            pacing_pullback_speed_threshold_px_s=cfg.get("pacing_pullback_speed_threshold_px_s", 0.0),
+            pacing_pullback_factor=cfg.get("pacing_pullback_factor", 0.0),
+            deadzone_x_px=cfg.get("deadzone_x_px", 15.0),
+            deadzone_y_px=cfg.get("deadzone_y_px", 12.0),
+            deadzone_zoom_px=cfg.get("deadzone_zoom_px", 35.0),
+            smoothing_tau=cfg.get("smoothing_tau", 0.70),
+            max_pan_speed_px_s=cfg.get("max_pan_speed_px_s", 180.0),
+            max_tilt_speed_px_s=cfg.get("max_tilt_speed_px_s", 120.0),
+            max_zoom_speed_px_s=cfg.get("max_zoom_speed_px_s", 50.0),
         )
         tracker = PerformerTracker(
             stage_polygon=self.stage_polygon,
-            loss_hold_seconds=2.5,
+            loss_hold_seconds=cfg.get("loss_hold_seconds", 15.0),
             allow_proximity_reacquisition=True,
             require_confirmation_after_loss=False,
             max_performer_y=float(floor_cutoff_y),
@@ -355,7 +356,7 @@ class DirectorStream:
                     sy = self.src_h / 360.0
 
                 raw_faces = self.face_cascade.detectMultiScale(
-                    det_gray, scaleFactor=1.15, minNeighbors=3, minSize=(20, 20), maxSize=(120, 120)
+                    det_gray, scaleFactor=1.15, minNeighbors=4, minSize=(22, 22), maxSize=(58, 58)
                 )
 
                 candidate_boxes = []
