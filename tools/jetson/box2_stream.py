@@ -42,7 +42,7 @@ try:
     import cv2
     import numpy as np
     from stage_director.adapter import StageFramingAdapter
-    from stage_director.core import BookingSnapshot
+    from stage_director.core import BookingSnapshot, Mode
     from stage_director.framing import FramingConfig
     from stage_director.geometry import BoundingBox, StagePolygon
     from stage_director.tracking import PerformerTracker
@@ -224,15 +224,15 @@ class DirectorStream:
 
         src_h, src_w = test_frame.shape[:2]
 
-        # Stage polygon & floor rejection (standing human face is in upper 60% of canvas)
+        # Stage polygon & floor rejection (standing human face is in upper 65% of canvas)
         scale_x = src_w / 640.0
         scale_y = src_h / 360.0
-        floor_cutoff_y = int(215 * scale_y)
+        floor_cutoff_y = int(230 * scale_y)
         stage_vertices = [
-            (int(150 * scale_x), int(50 * scale_y)),
-            (int(440 * scale_x), int(50 * scale_y)),
-            (int(440 * scale_x), floor_cutoff_y),
-            (int(150 * scale_x), floor_cutoff_y),
+            (int(30 * scale_x), int(20 * scale_y)),
+            (int((640 - 30) * scale_x), int(20 * scale_y)),
+            (int((640 - 30) * scale_x), floor_cutoff_y),
+            (int(30 * scale_x), floor_cutoff_y),
         ]
         self.stage_polygon = StagePolygon(vertices=stage_vertices)
         self.floor_cutoff_y = floor_cutoff_y
@@ -259,6 +259,7 @@ class DirectorStream:
             stage_polygon=self.stage_polygon,
             loss_hold_seconds=2.5,
             allow_proximity_reacquisition=True,
+            require_confirmation_after_loss=False,
             max_performer_y=float(floor_cutoff_y),
         )
         self.adapter = StageFramingAdapter(
@@ -267,18 +268,10 @@ class DirectorStream:
             allow_proximity_reacquisition=True,
         )
 
+        self.session_expires = None
+        self._last_logged_state = None
         now_utc = datetime.now(timezone.utc)
-        booking = BookingSnapshot(
-            booking_id=f"live-box2-{int(time.time())}", revision=1,
-            slot_start_utc=now_utc - timedelta(seconds=1),
-            slot_end_utc=now_utc + timedelta(hours=24),
-            issued_at_utc=now_utc - timedelta(seconds=10),
-            expires_at_utc=now_utc + timedelta(hours=25),
-            stage_seconds=86400, privacy_class="public",
-            checked_in=True, live_consent=True, tracking_consent=True, capture_verified=True,
-        )
-        self.adapter.arm(booking, now_utc)
-        self.adapter.start_set(now_utc, time.monotonic(), host_confirmed=True)
+        self.ensure_session(now_utc, time.monotonic())
 
         bitrate = cfg.get("bitrate", "2500k")
         self.proc = subprocess.Popen(
@@ -313,6 +306,25 @@ class DirectorStream:
         threading.Thread(target=self.read_progress, daemon=True).start()
         threading.Thread(target=self.read_errors, daemon=True).start()
 
+    def ensure_session(self, now_utc, cur_mono):
+        """Keep an active session going 24/7. Auto-renew if expired or within 1 hour of expiration."""
+        if (self.session_expires is None or
+            now_utc >= self.session_expires - timedelta(hours=1) or
+            self.adapter.director.mode != Mode.LIVE):
+            self.session_expires = now_utc + timedelta(days=7)
+            booking = BookingSnapshot(
+                booking_id=f"live-box2-{int(time.time())}", revision=1,
+                slot_start_utc=now_utc - timedelta(seconds=5),
+                slot_end_utc=self.session_expires,
+                issued_at_utc=now_utc - timedelta(seconds=10),
+                expires_at_utc=self.session_expires + timedelta(days=1),
+                stage_seconds=7 * 86400, privacy_class="public",
+                checked_in=True, live_consent=True, tracking_consent=True, capture_verified=True,
+            )
+            self.adapter.arm(booking, now_utc)
+            self.adapter.start_set(now_utc, cur_mono, host_confirmed=True)
+            log("Stage Director: session armed and started (perpetual live mode)")
+
     def run_worker(self):
         try:
             while not self._stop_event.is_set() and self.proc.poll() is None:
@@ -323,12 +335,13 @@ class DirectorStream:
 
                 cur_mono = time.monotonic()
                 cur_utc = datetime.now(timezone.utc)
+                self.ensure_session(cur_utc, cur_mono)
 
                 # Fast face detection on downscaled grayscale thumbnail (~4ms vs ~80ms)
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 small_gray = cv2.resize(gray, (320, 180), interpolation=cv2.INTER_LINEAR)
                 raw_faces = self.face_cascade.detectMultiScale(
-                    small_gray, scaleFactor=1.1, minNeighbors=3, minSize=(16, 16)
+                    small_gray, scaleFactor=1.1, minNeighbors=4, minSize=(16, 16), maxSize=(65, 65)
                 )
 
                 scale_w = self.src_w / 320.0
@@ -346,10 +359,17 @@ class DirectorStream:
                         candidate_boxes.append(bbox)
                         onstage_count += 1
 
-                if self.adapter.tracker.state.value in ("acquiring", "ambiguous") and onstage_count == 1:
+                # Auto-confirm performer when available and tracker needs acquisition
+                if self.adapter.tracker.state.value in ("acquiring", "ambiguous", "lost") and candidate_boxes:
                     self.adapter.confirm_subject(candidate_boxes[0], cur_mono)
 
                 proposal = self.adapter.process_frame(candidate_boxes, cur_utc, cur_mono)
+
+                # Log tracking state transitions
+                current_state = (proposal.tracking_state, proposal.camera_action)
+                if current_state != self._last_logged_state:
+                    log(f"Stage Director state: {proposal.tracking_state}, action: {proposal.camera_action}, candidates: {onstage_count}")
+                    self._last_logged_state = current_state
 
                 crop = proposal.obs_crop
                 if crop and proposal.camera_action == "track_face":
