@@ -211,7 +211,9 @@ class DirectorStream:
 
         self.out_w = cfg.get("output_width", 1280)
         self.out_h = cfg.get("output_height", 720)
-        self.fps = cfg.get("output_fps", 15.0)
+        # NVR subStream delivers 10 FPS; match input fps to prevent frame starvation and buffering
+        self.fps = cfg.get("output_fps", 10.0)
+        self.top_matte_h = cfg.get("top_matte_h", int(110 * (self.out_h / 720.0)))
 
         self.cap = cv2.VideoCapture(source)
         if not self.cap.isOpened():
@@ -292,6 +294,7 @@ class DirectorStream:
              '-i', 'pipe:0',
              '-map', '1:v:0',
              '-map', '0:a:0?',
+             '-r', '30',
              '-c:v', 'libx264',
              '-preset', 'veryfast',
              '-tune', 'zerolatency',
@@ -397,6 +400,10 @@ class DirectorStream:
                         rendered = cv2.resize(frame, (self.out_w, self.out_h), interpolation=cv2.INTER_AREA)
                 else:
                     rendered = cv2.resize(frame, (self.out_w, self.out_h), interpolation=cv2.INTER_AREA)
+
+                # Mask out top ceiling ductwork down to middle of brightest headlight
+                if self.top_matte_h > 0:
+                    rendered[:self.top_matte_h, :] = 0
 
                 try:
                     self.proc.stdin.write(rendered.tobytes())
