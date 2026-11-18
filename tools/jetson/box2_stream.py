@@ -224,10 +224,10 @@ class DirectorStream:
 
         src_h, src_w = test_frame.shape[:2]
 
-        # Stage polygon & floor rejection (standing human face is in upper 65% of canvas)
+        # Stage polygon & floor rejection (covers elevated T-stage surface down to y=315 for floor work / sit-ups)
         scale_x = src_w / 640.0
         scale_y = src_h / 360.0
-        floor_cutoff_y = int(230 * scale_y)
+        floor_cutoff_y = int(315 * scale_y)
         stage_vertices = [
             (int(30 * scale_x), int(20 * scale_y)),
             (int((640 - 30) * scale_x), int(20 * scale_y)),
