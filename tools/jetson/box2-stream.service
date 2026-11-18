@@ -1,0 +1,12 @@
+[Unit]
+Description=BOX2 stream box (NVR stage camera and mic to Twitch)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 -u %h/box2-stream/box2_stream.py run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
