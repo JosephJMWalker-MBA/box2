@@ -139,6 +139,24 @@ class FramingTests(unittest.TestCase):
         offset = face.center_y - target.top
         self.assertAlmostEqual(offset / target.height, 0.33, places=2)
 
+    def test_eye_level_centered_framing(self):
+        """Centered framing (headroom_fraction=0.50) positions between the performer's eyes dead-center."""
+        center_config = FramingConfig(
+            canvas_width=3840,
+            canvas_height=2160,
+            target_face_fraction=0.28,
+            headroom_fraction=0.50,
+            max_zoom=2.6,
+        )
+        engine = FramingEngine(center_config)
+        face = BoundingBox(x=1820.0, y=980.0, width=200.0, height=240.0)
+        target = engine.compute_target_window(face)
+
+        # In 16:9 target crop, face center_y should equal crop center_y exactly
+        self.assertAlmostEqual(target.center_y, face.center_y, places=2)
+        offset = face.center_y - target.top
+        self.assertAlmostEqual(offset / target.height, 0.50, places=2)
+
     def test_periodic_room_view_cadence(self):
         """Periodic room view establishes wide shot every interval and returns to close-up."""
         config = FramingConfig(

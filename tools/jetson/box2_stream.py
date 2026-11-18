@@ -665,6 +665,7 @@ class DirectorStream:
             canvas_width=src_w,
             canvas_height=src_h,
             target_face_fraction=cfg.get("target_face_fraction", 0.28),
+            headroom_fraction=cfg.get("headroom_fraction", 0.50),
             max_zoom=cfg.get("max_zoom", 2.6),
             periodic_room_view_enabled=cfg.get("periodic_room_view_enabled", False),
             room_view_interval_s=cfg.get("room_view_interval_s", 90.0),
