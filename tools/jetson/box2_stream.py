@@ -28,6 +28,12 @@ import threading
 import time
 import urllib.request
 
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+
 HOME = Path(__file__).resolve().parent
 CONFIG, STATE, STATUS = HOME / 'config.json', HOME / 'state.json', HOME / 'status.json'
 STALL_SECONDS = 15
@@ -284,6 +290,159 @@ class TickerOverlay:
             cv2.putText(ticker_roi, self.full_ticker_str, (start_x + tw, 30), font, font_scale, (0, 230, 255), font_thick)
 
 
+class WallOverlay:
+    """Subtle painted wall branding displayed on the dark stage wall when stage is empty.
+    Fades smoothly away to 0 opacity when a performer is detected/framed.
+    Hot-reloads from ticker.json without restarting the stream.
+    """
+    def __init__(self, config_path="/home/joseph1/box2-stream/ticker.json", base_w=1280, base_h=720):
+        self.config_path = config_path
+        self.w = base_w
+        self.h = base_h
+        self.last_mtime = 0
+        self.last_check = 0
+        self.enabled = True
+        self.lines = ["PARKING LOT", "CENTER"]
+        self.x = 210
+        self.y = 170
+        self.font_size = 32
+        self.letter_spacing = 6
+        self.max_opacity = 0.55
+        self.fade_speed = 0.04
+        self.color = (220, 222, 225)
+        self.style = "stacked"  # "stacked", "stencil_lines", "single_line"
+        
+        self.current_opacity = 0.55
+        self.roi_x1 = 0
+        self.roi_y1 = 0
+        self.roi_x2 = 0
+        self.roi_y2 = 0
+        self.alpha_mask_roi = None
+        self.color_bgr = None
+        self._load_config(force=True)
+
+    def reload_if_needed(self, force=False):
+        now = time.monotonic()
+        if not force and (now - self.last_check < 2.0):
+            return
+        self.last_check = now
+        if not os.path.exists(self.config_path):
+            return
+        try:
+            mtime = os.path.getmtime(self.config_path)
+            if force or mtime > self.last_mtime:
+                self.last_mtime = mtime
+                self._load_config(force=force)
+        except OSError:
+            pass
+
+    def _load_config(self, force=False):
+        try:
+            with open(self.config_path, "r") as f:
+                data = json.load(f)
+            wall_cfg = data.get("wall_overlay", {})
+            self.enabled = wall_cfg.get("enabled", True)
+            self.lines = wall_cfg.get("lines", ["PARKING LOT", "CENTER"])
+            self.x = wall_cfg.get("x", 210)
+            self.y = wall_cfg.get("y", 170)
+            self.font_size = wall_cfg.get("font_size", 32)
+            self.letter_spacing = wall_cfg.get("letter_spacing", 6)
+            self.max_opacity = float(wall_cfg.get("max_opacity", 0.55))
+            self.fade_speed = float(wall_cfg.get("fade_speed", 0.04))
+            self.style = wall_cfg.get("style", "stacked")
+            raw_color = wall_cfg.get("color", [220, 222, 225])
+            self.color = tuple(raw_color)
+            self._precompute_overlay()
+        except Exception:
+            pass
+
+    def _precompute_overlay(self):
+        if not HAS_PIL:
+            return
+        font_paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/Library/Fonts/Arial Bold.ttf",
+        ]
+        font = None
+        for fp in font_paths:
+            if os.path.exists(fp):
+                try:
+                    font = ImageFont.truetype(fp, self.font_size)
+                    break
+                except Exception:
+                    pass
+        if font is None:
+            font = ImageFont.load_default()
+
+        overlay = Image.new("RGBA", (self.w, self.h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        
+        lines_to_render = self.lines
+        if self.style == "single_line":
+            lines_to_render = [" ".join(self.lines)]
+
+        curr_y = self.y
+        total_w = 0
+        line_bboxes = []
+        for line in lines_to_render:
+            chars = list(line)
+            line_w = 0
+            char_widths = []
+            for ch in chars:
+                bbox = font.getbbox(ch)
+                cw = bbox[2] - bbox[0] + self.letter_spacing
+                char_widths.append(cw)
+                line_w += cw
+            line_w -= self.letter_spacing
+            line_bboxes.append((line, line_w, char_widths))
+            total_w = max(total_w, line_w)
+            
+        for line, line_w, char_widths in line_bboxes:
+            curr_x = self.x + (total_w - line_w) // 2
+            for ch, cw in zip(list(line), char_widths):
+                draw.text((curr_x, curr_y), ch, font=font, fill=(self.color[0], self.color[1], self.color[2], 255))
+                curr_x += cw
+            curr_y += self.font_size + 14
+
+        if self.style == "stencil_lines":
+            draw.line([(self.x - 15, self.y - 12), (self.x + total_w + 15, self.y - 12)], fill=(self.color[0], self.color[1], self.color[2], 200), width=2)
+            draw.line([(self.x - 15, curr_y - 2), (self.x + total_w + 15, curr_y - 2)], fill=(self.color[0], self.color[1], self.color[2], 200), width=2)
+
+        overlay_np = np.array(overlay)
+        alpha_raw = overlay_np[:, :, 3].astype(float) / 255.0
+        alpha_blur = cv2.GaussianBlur(alpha_raw, (3, 3), 0.6)
+        
+        y_indices, x_indices = np.where(alpha_blur > 0.005)
+        if len(y_indices) > 0:
+            self.roi_y1, self.roi_y2 = max(0, int(y_indices.min()) - 2), min(self.h, int(y_indices.max()) + 3)
+            self.roi_x1, self.roi_x2 = max(0, int(x_indices.min()) - 2), min(self.w, int(x_indices.max()) + 3)
+            self.alpha_mask_roi = alpha_blur[self.roi_y1:self.roi_y2, self.roi_x1:self.roi_x2, np.newaxis]
+            self.color_bgr = np.array([self.color[2], self.color[1], self.color[0]], dtype=float)
+        else:
+            self.alpha_mask_roi = None
+
+    def draw(self, frame_bgr, is_performer_framed=False):
+        if not self.enabled or self.alpha_mask_roi is None:
+            return
+
+        self.reload_if_needed()
+
+        target_opacity = 0.0 if is_performer_framed else self.max_opacity
+        if self.current_opacity < target_opacity:
+            self.current_opacity = min(target_opacity, self.current_opacity + self.fade_speed)
+        elif self.current_opacity > target_opacity:
+            self.current_opacity = max(target_opacity, self.current_opacity - self.fade_speed)
+
+        if self.current_opacity > 0.005:
+            eff_alpha = self.alpha_mask_roi * self.current_opacity
+            roi = frame_bgr[self.roi_y1:self.roi_y2, self.roi_x1:self.roi_x2]
+            frame_bgr[self.roi_y1:self.roi_y2, self.roi_x1:self.roi_x2] = (
+                (1.0 - eff_alpha) * roi + eff_alpha * self.color_bgr
+            ).astype(np.uint8)
+
+
 class DirectorStream:
     """Stage Director AI framing stream with close-up tracking, pet rejection, and watchdog."""
 
@@ -301,6 +460,7 @@ class DirectorStream:
         self.fps = cfg.get("output_fps", 10.0)
         self.top_matte_h = cfg.get("top_matte_h", int(110 * (self.out_h / 720.0)))
         self.ticker = TickerOverlay(config_path="/home/joseph1/box2-stream/ticker.json", top_h=self.top_matte_h)
+        self.wall_overlay = WallOverlay(config_path="/home/joseph1/box2-stream/ticker.json", base_w=self.out_w, base_h=self.out_h)
 
         self.cap = cv2.VideoCapture(source)
         if not self.cap.isOpened():
@@ -487,6 +647,10 @@ class DirectorStream:
                         rendered = cv2.resize(frame, (self.out_w, self.out_h), interpolation=cv2.INTER_AREA)
                 else:
                     rendered = cv2.resize(frame, (self.out_w, self.out_h), interpolation=cv2.INTER_AREA)
+
+                # Subtle painted wall overlay (fades to 0 when performer is on stage)
+                is_performer_framed = (proposal.tracking_state == "tracking") or (onstage_count > 0)
+                self.wall_overlay.draw(rendered, is_performer_framed=is_performer_framed)
 
                 # Draw top broadcast banner with live moving timestamp & scrolling ticker tape
                 if self.top_matte_h > 0:
