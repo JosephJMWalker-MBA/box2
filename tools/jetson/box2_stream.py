@@ -212,13 +212,30 @@ class Stream:
                 os.killpg(self.proc.pid, signal.SIGKILL)
 
 
-class TickerOverlay:
-    """Renders broadcast header banner with live moving timestamp and scrolling ticker tape."""
+def next_scheduled_refresh_time(interval_hours=3):
+    """Calculates the next top-of-the-hour timestamp divisible by interval_hours."""
+    if not interval_hours or interval_hours <= 0:
+        return None
+    now_dt = datetime.now()
+    cand = now_dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    while cand.hour % interval_hours != 0 or cand <= now_dt:
+        cand += timedelta(hours=1)
+    return cand
 
-    def __init__(self, config_path="/home/joseph1/box2-stream/ticker.json", top_h=110):
+
+class TickerOverlay:
+    """Renders broadcast header banner with live moving timestamp, scrolling ticker tape,
+    and dynamic warnings/countdown for scheduled 3-hour VOD resets.
+    """
+
+    def __init__(self, config_path="/home/joseph1/box2-stream/ticker.json", top_h=110, refresh_hours=3):
         self.config_path = config_path
         self.top_h = top_h
+        self.refresh_hours = refresh_hours
         self.last_load = 0.0
+        self.last_countdown_update = 0.0
+        self.current_rem_sec = None
+        self.next_time_str = ""
         self.data = {
             "title": "BOX 2  |  CANTON REFINERY",
             "messages": [
@@ -233,16 +250,55 @@ class TickerOverlay:
         self.full_ticker_str = ""
         self._update_full_str()
 
-    def _update_full_str(self):
-        msgs = self.data.get("messages", [])
-        if not msgs:
-            msgs = ["BOX 2 LIVE"]
-        self.full_ticker_str = "      *      ".join(msgs) + "      *      "
+    def _update_full_str(self, test_rem_sec=None):
+        raw_msgs = list(self.data.get("messages", []))
+        if not raw_msgs:
+            raw_msgs = ["BOX 2 LIVE"]
+
+        # Calculate time remaining until next scheduled top-of-hour refresh
+        rem_sec = test_rem_sec
+        next_time_str = ""
+        if rem_sec is None and self.refresh_hours > 0:
+            next_ref = next_scheduled_refresh_time(self.refresh_hours)
+            if next_ref:
+                now_dt = datetime.now()
+                rem_sec = (next_ref - now_dt).total_seconds()
+                next_time_str = next_ref.strftime("%I:%M %p").lstrip("0")
+        elif rem_sec is not None:
+            next_time_str = "3:00 AM"
+
+        self.current_rem_sec = rem_sec
+        self.next_time_str = next_time_str
+
+        msgs = []
+        if rem_sec is not None:
+            if rem_sec <= 60:
+                s = max(1, int(rem_sec))
+                alert = f"*** SCHEDULED RESET IN {s}s -- REFRESHING IN 7s FOR VOD CLIPPING ARCHIVE ***"
+                msgs = [alert, alert]
+            elif rem_sec <= 300:
+                m = int(rem_sec // 60)
+                s = int(rem_sec % 60)
+                alert = f"WARNING: SCHEDULED 3-HOUR RESET IN {m}m {s:02d}s (AT {next_time_str}) FOR VOD CLIPPING ARCHIVE -- BACK IN 7s"
+                msgs = [alert] + raw_msgs
+            elif rem_sec <= 600:
+                m = int(rem_sec // 60)
+                notice = f"NOTICE: 3-Hour VOD reset in {m} min (at {next_time_str}) for clipping archive"
+                msgs = [notice] + raw_msgs
+            else:
+                schedule_msg = f"RESET SCHEDULE: Next 3-hour clipping VOD rollover at {next_time_str} (brief 7s pause)"
+                msgs = raw_msgs + [schedule_msg]
+        else:
+            msgs = raw_msgs
+
+        new_ticker_str = "      *      ".join(msgs) + "      *      "
+        if new_ticker_str != self.full_ticker_str:
+            self.full_ticker_str = new_ticker_str
 
     def reload_if_needed(self):
-        now = time.monotonic()
-        if now - self.last_load > 2.0:
-            self.last_load = now
+        now_mono = time.monotonic()
+        if now_mono - self.last_load > 2.0:
+            self.last_load = now_mono
             if os.path.exists(self.config_path):
                 try:
                     with open(self.config_path) as f:
@@ -252,6 +308,11 @@ class TickerOverlay:
                         self._update_full_str()
                 except Exception:
                     pass
+
+        # Update countdown string every 1.0s
+        if now_mono - self.last_countdown_update >= 1.0:
+            self.last_countdown_update = now_mono
+            self._update_full_str()
 
     def draw(self, frame_bgr):
         h, w = frame_bgr.shape[:2]
@@ -271,16 +332,40 @@ class TickerOverlay:
         title = self.data.get("title", "BOX 2  |  CANTON REFINERY")
         cv2.putText(frame_bgr, title, (140, 33), cv2.FONT_HERSHEY_DUPLEX, 0.6, (220, 220, 220), 1)
 
-        # 4. Live moving timestamp (updates each second)
+        # 4. Imminent reset warning badge (shows when <= 3 minutes / 180s before rollover)
+        rem_sec = self.current_rem_sec
+        if rem_sec is not None and rem_sec <= 180:
+            if rem_sec <= 60:
+                badge_text = f"RESET IN {max(1, int(rem_sec))}s"
+                badge_bg = (15, 35, 90)
+                badge_border = (0, 180, 255)
+                text_color = (0, 220, 255)
+            else:
+                m = int(rem_sec // 60)
+                s = int(rem_sec % 60)
+                badge_text = f"RESET IN {m}m {s:02d}s"
+                badge_bg = (20, 45, 100)
+                badge_border = (0, 160, 230)
+                text_color = (0, 210, 255)
+
+            cv2.rectangle(frame_bgr, (500, 12), (730, 42), badge_bg, -1)
+            cv2.rectangle(frame_bgr, (500, 12), (730, 42), badge_border, 1)
+            cv2.putText(frame_bgr, badge_text, (518, 33), cv2.FONT_HERSHEY_DUPLEX, 0.55, text_color, 1)
+
+        # 5. Live moving timestamp (updates each second)
         now_str = datetime.now().strftime("%m/%d/%Y  %I:%M:%S %p")
         cv2.putText(frame_bgr, now_str, (w - 380, 33), cv2.FONT_HERSHEY_DUPLEX, 0.58, (220, 220, 220), 1)
 
-        # 5. Ticker tape box (y=50 to 96)
+        # 6. Ticker tape box (y=50 to 96)
+        is_imminent = rem_sec is not None and rem_sec <= 300
+        box_border_color = (0, 180, 255) if is_imminent else (60, 60, 70)
+        ticker_text_color = (0, 220, 255) if is_imminent else (0, 230, 255)
+
         box_x1, box_y1, box_x2, box_y2 = 20, 50, w - 20, 96
         cv2.rectangle(frame_bgr, (box_x1, box_y1), (box_x2, box_y2), (28, 28, 34), -1)
-        cv2.rectangle(frame_bgr, (box_x1, box_y1), (box_x2, box_y2), (60, 60, 70), 1)
+        cv2.rectangle(frame_bgr, (box_x1, box_y1), (box_x2, box_y2), box_border_color, 1)
 
-        # 6. Smooth scrolling text clipped inside ROI
+        # 7. Smooth scrolling text clipped inside ROI
         ticker_roi = frame_bgr[box_y1+1:box_y2-1, box_x1+2:box_x2-2]
         roi_h, roi_w = ticker_roi.shape[:2]
 
@@ -293,9 +378,9 @@ class TickerOverlay:
         self.scroll_x = (self.scroll_x + speed) % max(1, tw)
 
         start_x = -self.scroll_x
-        cv2.putText(ticker_roi, self.full_ticker_str, (start_x, 30), font, font_scale, (0, 230, 255), font_thick)
+        cv2.putText(ticker_roi, self.full_ticker_str, (start_x, 30), font, font_scale, ticker_text_color, font_thick)
         if start_x + tw < roi_w:
-            cv2.putText(ticker_roi, self.full_ticker_str, (start_x + tw, 30), font, font_scale, (0, 230, 255), font_thick)
+            cv2.putText(ticker_roi, self.full_ticker_str, (start_x + tw, 30), font, font_scale, ticker_text_color, font_thick)
 
 
 class WallOverlay:
@@ -647,7 +732,8 @@ class DirectorStream:
         # NVR subStream delivers 10 FPS; match input fps to prevent frame starvation and buffering
         self.fps = cfg.get("output_fps", 10.0)
         self.top_matte_h = cfg.get("top_matte_h", int(110 * (self.out_h / 720.0)))
-        self.ticker = TickerOverlay(config_path="/home/joseph1/box2-stream/ticker.json", top_h=self.top_matte_h)
+        refresh_hours = int(cfg.get("scheduled_refresh_hours", 3))
+        self.ticker = TickerOverlay(config_path="/home/joseph1/box2-stream/ticker.json", top_h=self.top_matte_h, refresh_hours=refresh_hours)
         self.wall_overlay = WallOverlay(config_path="/home/joseph1/box2-stream/ticker.json", base_w=self.out_w, base_h=self.out_h)
 
         # Parking lot center camera feed overlay with dynamic token getter
@@ -1042,17 +1128,6 @@ class DirectorStream:
         token = self.get_token()
         if self.ip and token:
             threading.Thread(target=nvr_logout, args=(self.ip, token), daemon=True).start()
-
-
-def next_scheduled_refresh_time(interval_hours=3):
-    """Calculates the next top-of-the-hour timestamp divisible by interval_hours."""
-    if not interval_hours or interval_hours <= 0:
-        return None
-    now_dt = datetime.now()
-    cand = now_dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    while cand.hour % interval_hours != 0 or cand <= now_dt:
-        cand += timedelta(hours=1)
-    return cand
 
 
 def run():

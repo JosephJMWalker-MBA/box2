@@ -142,6 +142,45 @@ class StreamResilienceTests(unittest.TestCase):
         self.assertTrue(check_trigger(datetime(2026, 11, 18, 6, 0, 0), 7200))
         self.assertEqual(len(triggered), 2)
 
+    def test_ticker_scroll_warning_messages(self):
+        """Verifies warning string formatting at different time thresholds before reset."""
+        def format_ticker_messages(rem_sec, next_time_str="3:00 AM", raw_msgs=None):
+            if raw_msgs is None:
+                raw_msgs = ["COMEDY NIGHT"]
+            if rem_sec <= 60:
+                s = max(1, int(rem_sec))
+                alert = f"*** SCHEDULED RESET IN {s}s -- REFRESHING IN 7s FOR VOD CLIPPING ARCHIVE ***"
+                return [alert, alert]
+            elif rem_sec <= 300:
+                m = int(rem_sec // 60)
+                s = int(rem_sec % 60)
+                alert = f"WARNING: SCHEDULED 3-HOUR RESET IN {m}m {s:02d}s (AT {next_time_str}) FOR VOD CLIPPING ARCHIVE -- BACK IN 7s"
+                return [alert] + raw_msgs
+            elif rem_sec <= 600:
+                m = int(rem_sec // 60)
+                notice = f"NOTICE: 3-Hour VOD reset in {m} min (at {next_time_str}) for clipping archive"
+                return [notice] + raw_msgs
+            else:
+                schedule_msg = f"RESET SCHEDULE: Next 3-hour clipping VOD rollover at {next_time_str} (brief 7s pause)"
+                return raw_msgs + [schedule_msg]
+
+        # Case 1: Normal rotation (>10 mins away, e.g. 1800s / 30m)
+        normal = format_ticker_messages(1800)
+        self.assertIn("RESET SCHEDULE: Next 3-hour clipping VOD rollover at 3:00 AM", normal[-1])
+
+        # Case 2: 8 mins away (<10m, >5m) -> notice prepended
+        notice = format_ticker_messages(480)
+        self.assertTrue(notice[0].startswith("NOTICE: 3-Hour VOD reset in 8 min"))
+
+        # Case 3: 3m 45s away (<5m, >1m) -> high-priority warning
+        warning = format_ticker_messages(225)
+        self.assertTrue(warning[0].startswith("WARNING: SCHEDULED 3-HOUR RESET IN 3m 45s"))
+
+        # Case 4: 25s away (final minute) -> urgent repeated alert
+        urgent = format_ticker_messages(25)
+        self.assertEqual(len(urgent), 2)
+        self.assertIn("SCHEDULED RESET IN 25s", urgent[0])
+
 
 if __name__ == "__main__":
     unittest.main()
