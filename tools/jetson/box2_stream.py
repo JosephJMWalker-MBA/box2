@@ -169,6 +169,8 @@ class Stream:
         self.errors = []
         self.proc = subprocess.Popen(
             [FFMPEG, '-hide_banner', '-nostdin', '-loglevel', 'error', '-nostats', '-progress', 'pipe:1',
+             '-reconnect', '1', '-reconnect_at_eof', '1', '-reconnect_streamed', '1',
+             '-reconnect_on_network_error', '1', '-reconnect_delay_max', '2',
              '-rw_timeout', '15000000', '-i', source,
              '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy',
              '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
@@ -453,11 +455,11 @@ class CameraFeedWallOverlay:
     """Live secondary camera feed (e.g. Parking Lot Center) projected onto the dark stage wall.
     - Soft feathered edge projection or framed broadcast PIP
     - Fades smoothly to 0.0 opacity when a performer is detected/framed
-    - Background worker thread with auto-reconnect
+    - Background worker thread with auto-reconnect and token refresh
     - Live hot-reloading from ticker.json ("parking_lot_camera")
     """
     def __init__(self, cam_url, config_path="/home/joseph1/box2-stream/ticker.json", base_w=1280, base_h=720):
-        self.cam_url = cam_url
+        self.cam_url_getter = cam_url if callable(cam_url) else (lambda: cam_url)
         self.config_path = config_path
         self.base_w = base_w
         self.base_h = base_h
@@ -486,9 +488,8 @@ class CameraFeedWallOverlay:
         self._reload_config(force=True)
         
         # Start background reader thread
-        if self.cam_url:
-            self._thread = threading.Thread(target=self._worker, daemon=True)
-            self._thread.start()
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
 
     def _build_feather_mask(self):
         edge_feather = 14
@@ -503,17 +504,26 @@ class CameraFeedWallOverlay:
 
     def _worker(self):
         time.sleep(2.0)
+        fail_count = 0
         while self._running:
             try:
-                cap = cv2.VideoCapture(self.cam_url)
+                url = self.cam_url_getter()
+                if not url:
+                    time.sleep(2.0)
+                    continue
+                cap = cv2.VideoCapture(url)
                 if not cap.isOpened():
                     time.sleep(2.0)
                     continue
                 while self._running:
                     ret, frame = cap.read()
                     if not ret or frame is None:
+                        fail_count += 1
+                        if fail_count > 20:  # ~1s of read failure: break out to reconnect with fresh token
+                            break
                         time.sleep(0.05)
                         continue
+                    fail_count = 0
                     with self._lock:
                         self.latest_frame = frame
                 cap.release()
@@ -613,13 +623,24 @@ class CameraFeedWallOverlay:
 class DirectorStream:
     """Stage Director AI framing stream with close-up tracking, pet rejection, and watchdog."""
 
-    def __init__(self, source, target, secrets, cfg, cam2_url=None):
+    def __init__(self, source, target, secrets, cfg, cam2_url=None, ip=None, token=None):
+        self.ip = ip
+        self.cfg = cfg
         self.secrets = secrets
+        self.target = target
         self.started = time.monotonic()
         self.last_progress = self.started
         self.stats = {'frame': 0, 'fps': 0.0, 'bitrate': '', 'out_time': '00:00:00', 'mode': 'director'}
         self.errors = []
         self._stop_event = threading.Event()
+
+        # Token lifecycle & camera auto-reconnect
+        self.token = token
+        self.token_lock = threading.Lock()
+        self.last_token_renew = time.monotonic()
+        self.last_valid_frame = None
+        self.reconnecting_camera = False
+        self._reconnect_lock = threading.Lock()
 
         self.out_w = cfg.get("output_width", 1280)
         self.out_h = cfg.get("output_height", 720)
@@ -628,17 +649,22 @@ class DirectorStream:
         self.top_matte_h = cfg.get("top_matte_h", int(110 * (self.out_h / 720.0)))
         self.ticker = TickerOverlay(config_path="/home/joseph1/box2-stream/ticker.json", top_h=self.top_matte_h)
         self.wall_overlay = WallOverlay(config_path="/home/joseph1/box2-stream/ticker.json", base_w=self.out_w, base_h=self.out_h)
-        self.cam2_overlay = CameraFeedWallOverlay(cam2_url, config_path="/home/joseph1/box2-stream/ticker.json", base_w=self.out_w, base_h=self.out_h) if cam2_url else None
 
-        self.cap = cv2.VideoCapture(source)
+        # Parking lot center camera feed overlay with dynamic token getter
+        cam2_getter = self.get_cam2_url if (self.ip and self.token) else cam2_url
+        self.cam2_overlay = CameraFeedWallOverlay(cam2_getter, config_path="/home/joseph1/box2-stream/ticker.json", base_w=self.out_w, base_h=self.out_h) if (cam2_url or self.ip) else None
+
+        initial_url = self.get_cam0_url() if (self.ip and self.token) else source
+        self.cap = cv2.VideoCapture(initial_url)
         if not self.cap.isOpened():
-            raise RuntimeError(f"DirectorStream: Failed to open video source {source}")
+            raise RuntimeError(f"DirectorStream: Failed to open video source {initial_url}")
 
         ret, test_frame = self.cap.read()
         if not ret or test_frame is None:
             self.cap.release()
             raise RuntimeError("DirectorStream: Failed to read initial frame from camera")
 
+        self.last_valid_frame = test_frame.copy()
         src_h, src_w = test_frame.shape[:2]
 
         # Stage polygon & floor rejection (covers elevated T-stage surface down to y=315 for floor work / sit-ups)
@@ -701,8 +727,10 @@ class DirectorStream:
         bitrate = cfg.get("bitrate", "2500k")
         self.proc = subprocess.Popen(
             [FFMPEG, '-hide_banner', '-loglevel', 'error', '-nostats', '-progress', 'pipe:1',
+             '-reconnect', '1', '-reconnect_at_eof', '1', '-reconnect_streamed', '1',
+             '-reconnect_on_network_error', '1', '-reconnect_delay_max', '2',
              '-rw_timeout', '15000000',
-             '-i', source,
+             '-i', initial_url,
              '-f', 'rawvideo', '-vcodec', 'rawvideo',
              '-s', f'{self.out_w}x{self.out_h}',
              '-pix_fmt', 'bgr24',
@@ -732,6 +760,87 @@ class DirectorStream:
         threading.Thread(target=self.run_worker, daemon=True).start()
         threading.Thread(target=self.read_progress, daemon=True).start()
         threading.Thread(target=self.read_errors, daemon=True).start()
+        if self.ip and self.token:
+            threading.Thread(target=self._keepalive_worker, daemon=True).start()
+
+    def get_token(self):
+        with self.token_lock:
+            return self.token
+
+    def get_cam0_url(self):
+        token = self.get_token()
+        if self.ip and token:
+            return flv_url(self.ip, token, self.cfg)
+        return None
+
+    def get_cam2_url(self):
+        token = self.get_token()
+        if self.ip and token:
+            return flv_url_ch(self.ip, token, 1, 'sub')
+        return None
+
+    def _reconnect_camera(self):
+        if not self.ip:
+            self.reconnecting_camera = False
+            return
+        with self._reconnect_lock:
+            try:
+                log("Stage Director: Camera feed interrupted, renewing NVR session and reconnecting...")
+                new_token = nvr_login(self.ip, self.cfg)
+                with self.token_lock:
+                    old_token = self.token
+                    self.token = new_token
+                    self.last_token_renew = time.monotonic()
+                new_url = flv_url(self.ip, new_token, self.cfg)
+                new_cap = cv2.VideoCapture(new_url)
+                if new_cap.isOpened():
+                    ret, frame = new_cap.read()
+                    if ret and frame is not None:
+                        old_cap = self.cap
+                        self.cap = new_cap
+                        self.last_valid_frame = frame.copy()
+                        try:
+                            old_cap.release()
+                        except Exception:
+                            pass
+                        log("Stage Director: Camera connection recovered seamlessly (zero Twitch dropped frames)")
+                    else:
+                        new_cap.release()
+                if old_token:
+                    threading.Thread(target=nvr_logout, args=(self.ip, old_token), daemon=True).start()
+            except Exception as exc:
+                log(f"Stage Director camera reconnect warning: {scrub(str(exc), self.secrets)}")
+            finally:
+                self.reconnecting_camera = False
+
+    def _keepalive_worker(self):
+        """Active NVR session heartbeat and proactive token renewal.
+        1. Calls GetTime every 60s with current token to prevent NVR idle timeout.
+        2. Proactively renews token every 30m before 60m lease expires.
+        """
+        while not self._stop_event.is_set():
+            time.sleep(60.0)
+            if self._stop_event.is_set() or not self.ip:
+                break
+            try:
+                token = self.get_token()
+                if token:
+                    nvr_call(self.ip, f"cmd=GetTime&token={token}", [{"cmd": "GetTime", "action": 0, "param": {}}], timeout=5)
+            except Exception as exc:
+                log(f"Stage Director keepalive warning: {scrub(str(exc), self.secrets)}")
+
+            if time.monotonic() - self.last_token_renew > 1800.0:
+                try:
+                    new_token = nvr_login(self.ip, self.cfg)
+                    with self.token_lock:
+                        old_token = self.token
+                        self.token = new_token
+                        self.last_token_renew = time.monotonic()
+                    log("Stage Director: proactively renewed NVR session token (lease extended)")
+                    if old_token:
+                        threading.Thread(target=nvr_logout, args=(self.ip, old_token), daemon=True).start()
+                except Exception as exc:
+                    log(f"Stage Director token renewal warning: {scrub(str(exc), self.secrets)}")
 
     def ensure_session(self, now_utc, cur_mono):
         """Keep an active session going 24/7. Auto-renew if expired or within 1 hour of expiration."""
@@ -753,56 +862,86 @@ class DirectorStream:
             log("Stage Director: session armed and started (perpetual live mode)")
 
     def run_worker(self):
+        frame_interval = 1.0 / max(1.0, float(self.fps))
+        consecutive_read_fails = 0
+        proposal = None
+
         try:
             while not self._stop_event.is_set() and self.proc.poll() is None:
-                ret, frame = self.cap.read()
-                if not ret or frame is None:
-                    time.sleep(0.01)
-                    continue
+                loop_start = time.monotonic()
+                ret = False
+                frame = None
+
+                if self.cap is not None and self.cap.isOpened() and not self.reconnecting_camera:
+                    try:
+                        ret, frame = self.cap.read()
+                    except Exception:
+                        ret = False
+                        frame = None
+
+                if ret and frame is not None:
+                    consecutive_read_fails = 0
+                    self.last_valid_frame = frame.copy()
+                else:
+                    consecutive_read_fails += 1
+                    # Frame starvation protection: feed last valid frame into FFmpeg
+                    if self.last_valid_frame is not None:
+                        frame = self.last_valid_frame.copy()
+                    else:
+                        frame = np.zeros((self.src_h, self.src_w, 3), dtype=np.uint8)
+
+                    # Trigger camera capture auto-reconnect if read fails for >= 10 frames (~1.0s)
+                    if consecutive_read_fails >= 10 and not self.reconnecting_camera:
+                        self.reconnecting_camera = True
+                        threading.Thread(target=self._reconnect_camera, daemon=True).start()
 
                 cur_mono = time.monotonic()
                 cur_utc = datetime.now(timezone.utc)
                 self.ensure_session(cur_utc, cur_mono)
 
-                # Face detection on native 640x360 (~48ms, 100% detection rate on human faces)
-                if (self.src_w, self.src_h) == (640, 360):
-                    det_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    sx = 1.0
-                    sy = 1.0
-                else:
-                    det_frame = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_LINEAR)
-                    det_gray = cv2.cvtColor(det_frame, cv2.COLOR_BGR2GRAY)
-                    sx = self.src_w / 640.0
-                    sy = self.src_h / 360.0
-
-                raw_faces = self.face_cascade.detectMultiScale(
-                    det_gray, scaleFactor=1.15, minNeighbors=4, minSize=(22, 22), maxSize=(58, 58)
-                )
-
                 candidate_boxes = []
                 onstage_count = 0
-                for (fx, fy, fw, fh) in raw_faces:
-                    bbox = BoundingBox(
-                        x=float(fx * sx),
-                        y=float(fy * sy),
-                        width=float(fw * sx),
-                        height=float(fh * sy),
+                if consecutive_read_fails == 0:
+                    # Face detection on native 640x360 (~48ms, 100% detection rate on human faces)
+                    if (self.src_w, self.src_h) == (640, 360):
+                        det_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        sx = 1.0
+                        sy = 1.0
+                    else:
+                        det_frame = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_LINEAR)
+                        det_gray = cv2.cvtColor(det_frame, cv2.COLOR_BGR2GRAY)
+                        sx = self.src_w / 640.0
+                        sy = self.src_h / 360.0
+
+                    raw_faces = self.face_cascade.detectMultiScale(
+                        det_gray, scaleFactor=1.15, minNeighbors=4, minSize=(22, 22), maxSize=(58, 58)
                     )
-                    if bbox.center_y <= self.floor_cutoff_y and self.stage_polygon.contains_box(bbox):
-                        candidate_boxes.append(bbox)
-                        onstage_count += 1
 
-                # Auto-confirm performer when available and tracker needs acquisition
-                if self.adapter.tracker.state.value in ("acquiring", "ambiguous", "lost") and candidate_boxes:
-                    self.adapter.confirm_subject(candidate_boxes[0], cur_mono)
+                    for (fx, fy, fw, fh) in raw_faces:
+                        bbox = BoundingBox(
+                            x=float(fx * sx),
+                            y=float(fy * sy),
+                            width=float(fw * sx),
+                            height=float(fh * sy),
+                        )
+                        if bbox.center_y <= self.floor_cutoff_y and self.stage_polygon.contains_box(bbox):
+                            candidate_boxes.append(bbox)
+                            onstage_count += 1
 
-                proposal = self.adapter.process_frame(candidate_boxes, cur_utc, cur_mono)
+                    # Auto-confirm performer when available and tracker needs acquisition
+                    if self.adapter.tracker.state.value in ("acquiring", "ambiguous", "lost") and candidate_boxes:
+                        self.adapter.confirm_subject(candidate_boxes[0], cur_mono)
 
-                # Log tracking state transitions
-                current_state = (proposal.tracking_state, proposal.camera_action)
-                if current_state != self._last_logged_state:
-                    log(f"Stage Director state: {proposal.tracking_state}, action: {proposal.camera_action}, candidates: {onstage_count}")
-                    self._last_logged_state = current_state
+                    proposal = self.adapter.process_frame(candidate_boxes, cur_utc, cur_mono)
+
+                    # Log tracking state transitions
+                    current_state = (proposal.tracking_state, proposal.camera_action)
+                    if current_state != self._last_logged_state:
+                        log(f"Stage Director state: {proposal.tracking_state}, action: {proposal.camera_action}, candidates: {onstage_count}")
+                        self._last_logged_state = current_state
+
+                if proposal is None:
+                    proposal = self.adapter.process_frame([], cur_utc, cur_mono)
 
                 crop = proposal.obs_crop
                 if crop and proposal.camera_action == "track_face":
@@ -835,6 +974,12 @@ class DirectorStream:
                     self.last_progress = time.monotonic()
                 except (BrokenPipeError, OSError, ValueError):
                     break
+
+                # Frame pacing: maintain exact 10 FPS cadence
+                elapsed = time.monotonic() - loop_start
+                sleep_needed = frame_interval - elapsed
+                if sleep_needed > 0.002:
+                    time.sleep(sleep_needed)
         finally:
             try:
                 self.cap.release()
@@ -892,6 +1037,11 @@ class DirectorStream:
                 self.proc.wait(5)
             except subprocess.TimeoutExpired:
                 os.killpg(self.proc.pid, signal.SIGKILL)
+        if self.cam2_overlay is not None:
+            self.cam2_overlay._running = False
+        token = self.get_token()
+        if self.ip and token:
+            threading.Thread(target=nvr_logout, args=(self.ip, token), daemon=True).start()
 
 
 def run():
@@ -920,7 +1070,7 @@ def run():
             if stream_mode == 'director' and STAGE_DIRECTOR_AVAILABLE:
                 log(f"streaming (Stage Director {'live' if mode == 'on' else 'Twitch bandwidth test'}) from NVR at {ip}")
                 cam2_url = flv_url_ch(ip, token, 1, 'sub')
-                stream = DirectorStream(flv_url(ip, token, cfg), rtmp_url(cfg, mode), secrets + [token], cfg, cam2_url=cam2_url)
+                stream = DirectorStream(flv_url(ip, token, cfg), rtmp_url(cfg, mode), secrets + [token], cfg, cam2_url=cam2_url, ip=ip, token=token)
             else:
                 log(f"streaming (Passthrough {'live' if mode == 'on' else 'Twitch bandwidth test'}) from NVR at {ip}")
                 stream = Stream(flv_url(ip, token, cfg), rtmp_url(cfg, mode), secrets + [token], cfg)
@@ -938,14 +1088,15 @@ def run():
         except Exception as exc:
             status.update(state='recovering', last_error=scrub(str(exc), secrets + ([token] if token else [])),
                           restarts=status['restarts'] + 1)
-            log(f"problem: {status['last_error']} (retrying in {backoff} s)")
+            wait_s = max(backoff, 6)  # Give Twitch ingest proxy at least 6s to clear previous socket
+            log(f"problem: {status['last_error']} (retrying in {wait_s} s)")
             write_json(STATUS, {**status, 'updated': now()})
-            stop.wait(backoff)
+            stop.wait(wait_s)
             backoff = min(backoff * 2, 30)
         finally:
             if stream:
                 stream.stop()
-            if token and ip:
+            elif token and ip:
                 nvr_logout(ip, token)
     write_json(STATUS, {**status, 'state': 'stopped', 'updated': now()})
 
