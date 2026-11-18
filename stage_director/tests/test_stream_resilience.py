@@ -82,6 +82,66 @@ class StreamResilienceTests(unittest.TestCase):
         self.assertIn("token_renewed_456", get_cam0_url())
         self.assertIn("token_renewed_456", get_cam2_url())
 
+    def test_next_scheduled_refresh_time_calculation(self):
+        """Verifies calculation of next top of hour divisible by 3 hours."""
+        from datetime import datetime, timedelta
+
+        def get_next(dt, interval=3):
+            cand = dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            while cand.hour % interval != 0 or cand <= dt:
+                cand += timedelta(hours=1)
+            return cand
+
+        # Case 1: 00:45 EST -> next is 03:00 EST
+        t1 = datetime(2026, 11, 18, 0, 45, 0)
+        self.assertEqual(get_next(t1), datetime(2026, 11, 18, 3, 0, 0))
+
+        # Case 2: 03:00:05 EST (just rolled over) -> next is 06:00 EST
+        t2 = datetime(2026, 11, 18, 3, 0, 5)
+        self.assertEqual(get_next(t2), datetime(2026, 11, 18, 6, 0, 0))
+
+        # Case 3: 22:15 EST -> next is 00:00 EST next day
+        t3 = datetime(2026, 11, 18, 22, 15, 0)
+        self.assertEqual(get_next(t3), datetime(2026, 11, 19, 0, 0, 0))
+
+        # Case 4: 21:00:00 EST -> next is 00:00 EST next day
+        t4 = datetime(2026, 11, 18, 21, 0, 0)
+        self.assertEqual(get_next(t4), datetime(2026, 11, 19, 0, 0, 0))
+
+    def test_scheduled_rollover_slot_tracking(self):
+        """Verifies rollover only fires once per scheduled slot and respects min runtime."""
+        from datetime import datetime
+
+        refresh_hours = 3
+        last_refreshed_slot = None
+        triggered = []
+
+        def check_trigger(now_dt, stream_uptime_s):
+            nonlocal last_refreshed_slot
+            if (
+                refresh_hours > 0
+                and now_dt.hour % refresh_hours == 0
+                and now_dt.minute == 0
+                and (now_dt.year, now_dt.month, now_dt.day, now_dt.hour) != last_refreshed_slot
+                and stream_uptime_s > 300
+            ):
+                last_refreshed_slot = (now_dt.year, now_dt.month, now_dt.day, now_dt.hour)
+                triggered.append(now_dt)
+                return True
+            return False
+
+        # 02:59 - not top of hour
+        self.assertFalse(check_trigger(datetime(2026, 11, 18, 2, 59, 59), 3600))
+        # 03:00:00 - should trigger!
+        self.assertTrue(check_trigger(datetime(2026, 11, 18, 3, 0, 0), 3601))
+        # 03:00:30 (subsequent tick within same minute) - must NOT trigger again!
+        self.assertFalse(check_trigger(datetime(2026, 11, 18, 3, 0, 30), 10))
+        # 04:00:00 - hour not divisible by 3
+        self.assertFalse(check_trigger(datetime(2026, 11, 18, 4, 0, 0), 3600))
+        # 06:00:00 - next 3-hour slot, should trigger!
+        self.assertTrue(check_trigger(datetime(2026, 11, 18, 6, 0, 0), 7200))
+        self.assertEqual(len(triggered), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1044,13 +1044,27 @@ class DirectorStream:
             threading.Thread(target=nvr_logout, args=(self.ip, token), daemon=True).start()
 
 
+def next_scheduled_refresh_time(interval_hours=3):
+    """Calculates the next top-of-the-hour timestamp divisible by interval_hours."""
+    if not interval_hours or interval_hours <= 0:
+        return None
+    now_dt = datetime.now()
+    cand = now_dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    while cand.hour % interval_hours != 0 or cand <= now_dt:
+        cand += timedelta(hours=1)
+    return cand
+
+
 def run():
     cfg = json.loads(CONFIG.read_text())
     secrets = [cfg['nvr_password'], cfg['twitch_key']]
+    refresh_hours = int(cfg.get('scheduled_refresh_hours', 3))
     status = {'state': 'starting', 'since': now(), 'restarts': 0, 'nvr_ip': None, 'last_error': None}
     backoff = 3
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    last_refreshed_slot = None
+
     while not stop.is_set():
         mode = desired()
         if mode not in ('on', 'test'):
@@ -1058,6 +1072,7 @@ def run():
             stop.wait(2)
             continue
         token = ip = stream = None
+        scheduled_rollover = False
         try:
             ip = find_nvr(cfg['nvr_mac'], status.get('nvr_ip'))
             if not ip:
@@ -1081,8 +1096,38 @@ def run():
                     raise RuntimeError(f'no new video for {STALL_SECONDS} s; restarting')
                 if time.monotonic() - stream.started > 60:
                     backoff = 3  # a minute of good streaming resets the back-off
-                write_json(STATUS, {**status, **stream.stats, 'updated': now()})
+
+                # Scheduled 3-hour VOD refresh at the top of the hour for clean clipping blocks
+                now_dt = datetime.now()
+                if (
+                    refresh_hours > 0
+                    and now_dt.hour % refresh_hours == 0
+                    and now_dt.minute == 0
+                    and (now_dt.year, now_dt.month, now_dt.day, now_dt.hour) != last_refreshed_slot
+                    and (time.monotonic() - stream.started > 300)
+                ):
+                    last_refreshed_slot = (now_dt.year, now_dt.month, now_dt.day, now_dt.hour)
+                    log(f"Scheduled {refresh_hours}-hour VOD rollover at {now_dt.strftime('%I:%M %p')} for Twitch clip archiving")
+                    scheduled_rollover = True
+                    break
+
+                next_ref = next_scheduled_refresh_time(refresh_hours)
+                next_ref_str = next_ref.strftime('%Y-%m-%d %I:%M:%S %p') if next_ref else 'disabled'
+                write_json(STATUS, {
+                    **status,
+                    **stream.stats,
+                    'next_scheduled_refresh': next_ref_str,
+                    'updated': now(),
+                })
                 stop.wait(1)
+
+            if scheduled_rollover:
+                stream.stop()
+                status.update(last_error=None)
+                # Wait 7 seconds for Twitch ingest to close and archive the 3-hour VOD
+                stop.wait(7)
+                continue
+
             if stream.proc.poll() is not None and desired() == mode and not stop.is_set():
                 raise RuntimeError('ffmpeg exited: ' + (stream.errors[-1] if stream.errors else f'code {stream.proc.returncode}'))
         except Exception as exc:
