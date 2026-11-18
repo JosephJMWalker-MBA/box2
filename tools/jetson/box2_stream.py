@@ -209,9 +209,9 @@ class TickerOverlay:
             "title": "BOX 2  |  CANTON REFINERY",
             "messages": [
                 "NOW ON STAGE: Open Mic Comedy Session",
+                "BOOK STAGE TIME: https://box2.yurrmom.com",
+                "SPONSOR: YURRMOM.COM",
                 "UP NEXT: Comedians In The Box",
-                "BOOK STAGE TIME: CantonRefinery.com | DM @CantonRefinery",
-                "SPONSOR: Canton Refinery Comedy Club",
             ],
             "scroll_speed": 4,
         }
