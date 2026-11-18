@@ -318,10 +318,10 @@ class DirectorStream:
         scale_y = src_h / 360.0
         floor_cutoff_y = int(315 * scale_y)
         stage_vertices = [
-            (int(30 * scale_x), int(20 * scale_y)),
-            (int((640 - 30) * scale_x), int(20 * scale_y)),
-            (int((640 - 30) * scale_x), floor_cutoff_y),
-            (int(30 * scale_x), floor_cutoff_y),
+            (int(5 * scale_x), int(20 * scale_y)),
+            (int((640 - 5) * scale_x), int(20 * scale_y)),
+            (int((640 - 5) * scale_x), floor_cutoff_y),
+            (int(5 * scale_x), floor_cutoff_y),
         ]
         self.stage_polygon = StagePolygon(vertices=stage_vertices)
         self.floor_cutoff_y = floor_cutoff_y
