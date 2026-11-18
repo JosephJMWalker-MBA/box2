@@ -198,6 +198,92 @@ class Stream:
                 os.killpg(self.proc.pid, signal.SIGKILL)
 
 
+class TickerOverlay:
+    """Renders broadcast header banner with live moving timestamp and scrolling ticker tape."""
+
+    def __init__(self, config_path="/home/joseph1/box2-stream/ticker.json", top_h=110):
+        self.config_path = config_path
+        self.top_h = top_h
+        self.last_load = 0.0
+        self.data = {
+            "title": "BOX 2  |  CANTON REFINERY",
+            "messages": [
+                "NOW ON STAGE: Open Mic Comedy Session",
+                "UP NEXT: Comedians In The Box",
+                "BOOK STAGE TIME: CantonRefinery.com | DM @CantonRefinery",
+                "SPONSOR: Canton Refinery Comedy Club",
+            ],
+            "scroll_speed": 4,
+        }
+        self.scroll_x = 0
+        self.full_ticker_str = ""
+        self._update_full_str()
+
+    def _update_full_str(self):
+        msgs = self.data.get("messages", [])
+        if not msgs:
+            msgs = ["BOX 2 LIVE"]
+        self.full_ticker_str = "      *      ".join(msgs) + "      *      "
+
+    def reload_if_needed(self):
+        now = time.monotonic()
+        if now - self.last_load > 2.0:
+            self.last_load = now
+            if os.path.exists(self.config_path):
+                try:
+                    with open(self.config_path) as f:
+                        loaded = json.load(f)
+                    if loaded != self.data:
+                        self.data = loaded
+                        self._update_full_str()
+                except Exception:
+                    pass
+
+    def draw(self, frame_bgr):
+        h, w = frame_bgr.shape[:2]
+        self.reload_if_needed()
+
+        # 1. Solid matte banner background (y=0 to top_h)
+        frame_bgr[:self.top_h, :] = (15, 15, 18)
+        # Separator accent line
+        cv2.line(frame_bgr, (0, self.top_h - 1), (w, self.top_h - 1), (70, 70, 80), 2)
+
+        # 2. [● LIVE] badge
+        cv2.rectangle(frame_bgr, (20, 12), (120, 42), (30, 30, 190), -1)
+        cv2.circle(frame_bgr, (38, 27), 4, (255, 255, 255), -1)
+        cv2.putText(frame_bgr, "LIVE", (52, 33), cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
+
+        # 3. Stage title
+        title = self.data.get("title", "BOX 2  |  CANTON REFINERY")
+        cv2.putText(frame_bgr, title, (140, 33), cv2.FONT_HERSHEY_DUPLEX, 0.6, (220, 220, 220), 1)
+
+        # 4. Live moving timestamp (updates each second)
+        now_str = datetime.now().strftime("%m/%d/%Y  %I:%M:%S %p")
+        cv2.putText(frame_bgr, now_str, (w - 380, 33), cv2.FONT_HERSHEY_DUPLEX, 0.58, (220, 220, 220), 1)
+
+        # 5. Ticker tape box (y=50 to 96)
+        box_x1, box_y1, box_x2, box_y2 = 20, 50, w - 20, 96
+        cv2.rectangle(frame_bgr, (box_x1, box_y1), (box_x2, box_y2), (28, 28, 34), -1)
+        cv2.rectangle(frame_bgr, (box_x1, box_y1), (box_x2, box_y2), (60, 60, 70), 1)
+
+        # 6. Smooth scrolling text clipped inside ROI
+        ticker_roi = frame_bgr[box_y1+1:box_y2-1, box_x1+2:box_x2-2]
+        roi_h, roi_w = ticker_roi.shape[:2]
+
+        font = cv2.FONT_HERSHEY_DUPLEX
+        font_scale = 0.58
+        font_thick = 1
+        (tw, th), _ = cv2.getTextSize(self.full_ticker_str, font, font_scale, font_thick)
+
+        speed = self.data.get("scroll_speed", 4)
+        self.scroll_x = (self.scroll_x + speed) % max(1, tw)
+
+        start_x = -self.scroll_x
+        cv2.putText(ticker_roi, self.full_ticker_str, (start_x, 30), font, font_scale, (0, 230, 255), font_thick)
+        if start_x + tw < roi_w:
+            cv2.putText(ticker_roi, self.full_ticker_str, (start_x + tw, 30), font, font_scale, (0, 230, 255), font_thick)
+
+
 class DirectorStream:
     """Stage Director AI framing stream with close-up tracking, pet rejection, and watchdog."""
 
@@ -214,6 +300,7 @@ class DirectorStream:
         # NVR subStream delivers 10 FPS; match input fps to prevent frame starvation and buffering
         self.fps = cfg.get("output_fps", 10.0)
         self.top_matte_h = cfg.get("top_matte_h", int(110 * (self.out_h / 720.0)))
+        self.ticker = TickerOverlay(config_path="/home/joseph1/box2-stream/ticker.json", top_h=self.top_matte_h)
 
         self.cap = cv2.VideoCapture(source)
         if not self.cap.isOpened():
@@ -401,9 +488,9 @@ class DirectorStream:
                 else:
                     rendered = cv2.resize(frame, (self.out_w, self.out_h), interpolation=cv2.INTER_AREA)
 
-                # Mask out top ceiling ductwork down to middle of brightest headlight
+                # Draw top broadcast banner with live moving timestamp & scrolling ticker tape
                 if self.top_matte_h > 0:
-                    rendered[:self.top_matte_h, :] = 0
+                    self.ticker.draw(rendered)
 
                 try:
                     self.proc.stdin.write(rendered.tobytes())
