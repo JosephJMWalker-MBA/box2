@@ -142,6 +142,10 @@ def flv_url(ip, token, cfg):
     return f"http://{ip}/flv?port=1935&app=bcs&stream=channel{cfg['nvr_channel']}_{cfg['nvr_stream']}.bcs&token={token}"
 
 
+def flv_url_ch(ip, token, channel, stream='sub'):
+    return f"http://{ip}/flv?port=1935&app=bcs&stream=channel{channel}_{stream}.bcs&token={token}"
+
+
 def rtmp_url(cfg, mode):
     return f"{cfg['twitch_server'].rstrip('/')}/{cfg['twitch_key']}" + ('?bandwidthtest=true' if mode == 'test' else '')
 
@@ -193,6 +197,8 @@ class Stream:
                 log(f'ffmpeg: {line}')
 
     def stalled(self):
+        if time.monotonic() - self.started < 30.0:
+            return False
         return time.monotonic() - self.last_progress > STALL_SECONDS
 
     def stop(self):
@@ -443,10 +449,171 @@ class WallOverlay:
             ).astype(np.uint8)
 
 
+class CameraFeedWallOverlay:
+    """Live secondary camera feed (e.g. Parking Lot Center) projected onto the dark stage wall.
+    - Soft feathered edge projection or framed broadcast PIP
+    - Fades smoothly to 0.0 opacity when a performer is detected/framed
+    - Background worker thread with auto-reconnect
+    - Live hot-reloading from ticker.json ("parking_lot_camera")
+    """
+    def __init__(self, cam_url, config_path="/home/joseph1/box2-stream/ticker.json", base_w=1280, base_h=720):
+        self.cam_url = cam_url
+        self.config_path = config_path
+        self.base_w = base_w
+        self.base_h = base_h
+        
+        self.enabled = True
+        self.x = 120
+        self.y = 135
+        self.width = 340
+        self.height = 191
+        self.max_opacity = 0.65
+        self.fade_speed = 0.04
+        self.style = "feathered"  # "feathered" or "framed"
+        self.show_label = True
+        self.label = "PARKING LOT CENTER"
+        
+        self.current_opacity = 0.65
+        self.latest_frame = None
+        self._lock = threading.Lock()
+        self._running = True
+        self.last_check = 0
+        self.last_mtime = 0
+        
+        # Precomputed feather mask
+        self._feather_mask = None
+        self._build_feather_mask()
+        self._reload_config(force=True)
+        
+        # Start background reader thread
+        if self.cam_url:
+            self._thread = threading.Thread(target=self._worker, daemon=True)
+            self._thread.start()
+
+    def _build_feather_mask(self):
+        edge_feather = 14
+        mask = np.ones((self.height, self.width), dtype=float)
+        for i in range(min(edge_feather, self.height // 2, self.width // 2)):
+            f = float(i) / edge_feather
+            mask[i, :] *= f
+            mask[self.height - 1 - i, :] *= f
+            mask[:, i] *= f
+            mask[:, self.width - 1 - i] *= f
+        self._feather_mask = mask[:, :, np.newaxis]
+
+    def _worker(self):
+        time.sleep(2.0)
+        while self._running:
+            try:
+                cap = cv2.VideoCapture(self.cam_url)
+                if not cap.isOpened():
+                    time.sleep(2.0)
+                    continue
+                while self._running:
+                    ret, frame = cap.read()
+                    if not ret or frame is None:
+                        time.sleep(0.05)
+                        continue
+                    with self._lock:
+                        self.latest_frame = frame
+                cap.release()
+            except Exception:
+                time.sleep(2.0)
+
+    def reload_if_needed(self, force=False):
+        now = time.monotonic()
+        if not force and (now - self.last_check < 2.0):
+            return
+        self.last_check = now
+        if not os.path.exists(self.config_path):
+            return
+        try:
+            mtime = os.path.getmtime(self.config_path)
+            if force or mtime > self.last_mtime:
+                self.last_mtime = mtime
+                self._reload_config(force=force)
+        except OSError:
+            pass
+
+    def _reload_config(self, force=False):
+        try:
+            with open(self.config_path, "r") as f:
+                data = json.load(f)
+            cfg = data.get("parking_lot_camera", {})
+            self.enabled = cfg.get("enabled", True)
+            self.x = cfg.get("x", 120)
+            self.y = cfg.get("y", 135)
+            new_w = cfg.get("width", 340)
+            new_h = cfg.get("height", 191)
+            if new_w != self.width or new_h != self.height:
+                self.width = new_w
+                self.height = new_h
+                self._build_feather_mask()
+            self.max_opacity = float(cfg.get("max_opacity", 0.65))
+            self.fade_speed = float(cfg.get("fade_speed", 0.04))
+            self.style = cfg.get("style", "feathered")
+            self.show_label = cfg.get("show_label", True)
+            self.label = cfg.get("label", "PARKING LOT CENTER")
+        except Exception:
+            pass
+
+    def draw(self, frame_bgr, is_performer_framed=False):
+        if not self.enabled:
+            return
+
+        self.reload_if_needed()
+
+        target_opacity = 0.0 if is_performer_framed else self.max_opacity
+        if self.current_opacity < target_opacity:
+            self.current_opacity = min(target_opacity, self.current_opacity + self.fade_speed)
+        elif self.current_opacity > target_opacity:
+            self.current_opacity = max(target_opacity, self.current_opacity - self.fade_speed)
+
+        if self.current_opacity <= 0.005:
+            return
+
+        with self._lock:
+            cam_frame = self.latest_frame.copy() if self.latest_frame is not None else None
+
+        if cam_frame is None:
+            return
+
+        x1, y1 = self.x, self.y
+        x2, y2 = x1 + self.width, y1 + self.height
+        if x2 > frame_bgr.shape[1] or y2 > frame_bgr.shape[0]:
+            return
+
+        cam_resized = cv2.resize(cam_frame, (self.width, self.height))
+
+        if self.style == "feathered":
+            eff_alpha = self._feather_mask * self.current_opacity
+            wall_slice = frame_bgr[y1:y2, x1:x2]
+            frame_bgr[y1:y2, x1:x2] = ((1.0 - eff_alpha) * wall_slice + eff_alpha * cam_resized).astype(np.uint8)
+
+            if self.show_label:
+                font = cv2.FONT_HERSHEY_DUPLEX
+                (tw, th), _ = cv2.getTextSize(self.label, font, 0.45, 1)
+                label_x = x1 + (self.width - tw) // 2
+                label_y = y1 - 8
+                label_alpha = min(1.0, self.current_opacity * 1.3)
+                overlay = frame_bgr.copy()
+                cv2.putText(overlay, self.label, (label_x, label_y), font, 0.45, (200, 205, 210), 1)
+                cv2.addWeighted(overlay, label_alpha, frame_bgr, 1.0 - label_alpha, 0, frame_bgr)
+
+        elif self.style == "framed":
+            wall_slice = frame_bgr[y1:y2, x1:x2]
+            frame_bgr[y1:y2, x1:x2] = cv2.addWeighted(cam_resized, self.current_opacity, wall_slice, 1.0 - self.current_opacity, 0)
+            cv2.rectangle(frame_bgr, (x1 - 1, y1 - 1), (x2 + 1, y2 + 1), (70, 70, 80), 1)
+            if self.show_label:
+                font = cv2.FONT_HERSHEY_DUPLEX
+                cv2.rectangle(frame_bgr, (x1, y1 - 22), (x1 + 230, y1), (25, 25, 30), -1)
+                cv2.putText(frame_bgr, f"CAM 2 : {self.label}", (x1 + 6, y1 - 6), font, 0.42, (0, 230, 255), 1)
+
+
 class DirectorStream:
     """Stage Director AI framing stream with close-up tracking, pet rejection, and watchdog."""
 
-    def __init__(self, source, target, secrets, cfg):
+    def __init__(self, source, target, secrets, cfg, cam2_url=None):
         self.secrets = secrets
         self.started = time.monotonic()
         self.last_progress = self.started
@@ -461,6 +628,7 @@ class DirectorStream:
         self.top_matte_h = cfg.get("top_matte_h", int(110 * (self.out_h / 720.0)))
         self.ticker = TickerOverlay(config_path="/home/joseph1/box2-stream/ticker.json", top_h=self.top_matte_h)
         self.wall_overlay = WallOverlay(config_path="/home/joseph1/box2-stream/ticker.json", base_w=self.out_w, base_h=self.out_h)
+        self.cam2_overlay = CameraFeedWallOverlay(cam2_url, config_path="/home/joseph1/box2-stream/ticker.json", base_w=self.out_w, base_h=self.out_h) if cam2_url else None
 
         self.cap = cv2.VideoCapture(source)
         if not self.cap.isOpened():
@@ -559,6 +727,7 @@ class DirectorStream:
              target],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
 
+        self.last_progress = time.monotonic()
         threading.Thread(target=self.run_worker, daemon=True).start()
         threading.Thread(target=self.read_progress, daemon=True).start()
         threading.Thread(target=self.read_errors, daemon=True).start()
@@ -648,9 +817,12 @@ class DirectorStream:
                 else:
                     rendered = cv2.resize(frame, (self.out_w, self.out_h), interpolation=cv2.INTER_AREA)
 
-                # Subtle painted wall overlay (fades to 0 when performer is on stage)
+                # Subtle painted wall / parking lot camera overlay (fades to 0 when performer is on stage)
                 is_performer_framed = (proposal.tracking_state == "tracking") or (onstage_count > 0)
-                self.wall_overlay.draw(rendered, is_performer_framed=is_performer_framed)
+                if self.cam2_overlay is not None and self.cam2_overlay.enabled:
+                    self.cam2_overlay.draw(rendered, is_performer_framed=is_performer_framed)
+                else:
+                    self.wall_overlay.draw(rendered, is_performer_framed=is_performer_framed)
 
                 # Draw top broadcast banner with live moving timestamp & scrolling ticker tape
                 if self.top_matte_h > 0:
@@ -707,6 +879,8 @@ class DirectorStream:
                 pass
 
     def stalled(self):
+        if time.monotonic() - self.started < 30.0:
+            return False
         return time.monotonic() - self.last_progress > STALL_SECONDS
 
     def stop(self):
@@ -744,7 +918,8 @@ def run():
             stream_mode = cfg.get('stream_mode', 'director')
             if stream_mode == 'director' and STAGE_DIRECTOR_AVAILABLE:
                 log(f"streaming (Stage Director {'live' if mode == 'on' else 'Twitch bandwidth test'}) from NVR at {ip}")
-                stream = DirectorStream(flv_url(ip, token, cfg), rtmp_url(cfg, mode), secrets + [token], cfg)
+                cam2_url = flv_url_ch(ip, token, 1, 'sub')
+                stream = DirectorStream(flv_url(ip, token, cfg), rtmp_url(cfg, mode), secrets + [token], cfg, cam2_url=cam2_url)
             else:
                 log(f"streaming (Passthrough {'live' if mode == 'on' else 'Twitch bandwidth test'}) from NVR at {ip}")
                 stream = Stream(flv_url(ip, token, cfg), rtmp_url(cfg, mode), secrets + [token], cfg)
