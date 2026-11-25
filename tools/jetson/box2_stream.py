@@ -408,14 +408,24 @@ class TickerOverlay:
                 badge_border = (0, 160, 230)
                 text_color = (0, 210, 255)
 
-            cv2.rectangle(frame_bgr, (500, 12), (730, 42), badge_bg, -1)
-            cv2.rectangle(frame_bgr, (500, 12), (730, 42), badge_border, 1)
-            cv2.putText(frame_bgr, badge_text, (518, 33), cv2.FONT_HERSHEY_DUPLEX, 0.55, text_color, 1)
+            (tw, th), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_DUPLEX, 0.55, 1)
+            bx1, by1 = 500, 12
+            bx2, by2 = max(730, bx1 + tw + 32), 42
+            tx = bx1 + ((bx2 - bx1) - tw) // 2
+            ty = by1 + ((by2 - by1) + th) // 2
+            cv2.rectangle(frame_bgr, (bx1, by1), (bx2, by2), badge_bg, -1)
+            cv2.rectangle(frame_bgr, (bx1, by1), (bx2, by2), badge_border, 1)
+            cv2.putText(frame_bgr, badge_text, (tx, ty), cv2.FONT_HERSHEY_DUPLEX, 0.55, text_color, 1)
         elif standby_mode and self.data.get("privacy_placeholder", {}).get("show_standby_badge", True):
             standby_label = self.data.get("privacy_placeholder", {}).get("badge_label", "STAGE STANDBY")
-            cv2.rectangle(frame_bgr, (500, 12), (710, 42), (32, 34, 42), -1)
-            cv2.rectangle(frame_bgr, (500, 12), (710, 42), (110, 115, 130), 1)
-            cv2.putText(frame_bgr, standby_label, (520, 33), cv2.FONT_HERSHEY_DUPLEX, 0.52, (205, 210, 220), 1)
+            (tw, th), _ = cv2.getTextSize(standby_label, cv2.FONT_HERSHEY_DUPLEX, 0.52, 1)
+            bx1, by1 = 500, 12
+            bx2, by2 = max(710, bx1 + tw + 32), 42
+            tx = bx1 + ((bx2 - bx1) - tw) // 2
+            ty = by1 + ((by2 - by1) + th) // 2
+            cv2.rectangle(frame_bgr, (bx1, by1), (bx2, by2), (32, 34, 42), -1)
+            cv2.rectangle(frame_bgr, (bx1, by1), (bx2, by2), (110, 115, 130), 1)
+            cv2.putText(frame_bgr, standby_label, (tx, ty), cv2.FONT_HERSHEY_DUPLEX, 0.52, (205, 210, 220), 1)
 
         # 5. Live moving timestamp (updates each second)
         now_str = datetime.now().strftime("%m/%d/%Y  %I:%M:%S %p")
