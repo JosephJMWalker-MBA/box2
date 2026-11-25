@@ -54,7 +54,11 @@ class PerformerTracker:
                  max_area_ratio: float = 3.0,
                  require_confirmation_after_loss: bool = True,
                  allow_proximity_reacquisition: bool = False,
-                 max_performer_y: Optional[float] = None) -> None:
+                 max_performer_y: Optional[float] = None,
+                 exclusion_boxes: Optional[Sequence[BoundingBox]] = None,
+                 acquisition_confirm_frames: int = 1,
+                 acquisition_window_seconds: float = 1.2,
+                 reacquire_confirm_frames: int = 1) -> None:
         self.stage_polygon = stage_polygon or StagePolygon.default_stage()
         self.loss_hold_seconds = loss_hold_seconds
         self.min_confidence = min_confidence
@@ -64,11 +68,50 @@ class PerformerTracker:
         self.require_confirmation_after_loss = require_confirmation_after_loss
         self.allow_proximity_reacquisition = allow_proximity_reacquisition
         self.max_performer_y = max_performer_y
+        self.exclusion_boxes: List[BoundingBox] = list(exclusion_boxes or [])
+        self.acquisition_confirm_frames = max(1, int(acquisition_confirm_frames))
+        self.acquisition_window_seconds = max(0.1, float(acquisition_window_seconds))
+        self.reacquire_confirm_frames = max(1, int(reacquire_confirm_frames))
 
         self.state: TrackingState = TrackingState.DISABLED
         self.active_subject: Optional[BoundingBox] = None
         self._last_seen_monotonic: Optional[float] = None
         self._held_subject: Optional[BoundingBox] = None
+        self._pending_anchor: Optional[BoundingBox] = None
+        self._pending_hits: List[float] = []
+        self._holding_reacquire_hits: int = 0
+
+    def _reset_pending(self) -> None:
+        self._pending_anchor = None
+        self._pending_hits = []
+        self._holding_reacquire_hits = 0
+
+    def _is_excluded(self, box: BoundingBox) -> bool:
+        for ex in self.exclusion_boxes:
+            if (ex.left <= box.center_x <= ex.right and ex.top <= box.center_y <= ex.bottom) or box.iou(ex) > 0.15:
+                return True
+        return False
+
+    def _check_acquisition_persistence(self, candidate: BoundingBox, monotonic_seconds: float) -> bool:
+        """Require `acquisition_confirm_frames` spatially consistent detections within window."""
+        if self.acquisition_confirm_frames <= 1:
+            self._reset_pending()
+            return True
+
+        cutoff = monotonic_seconds - self.acquisition_window_seconds
+        self._pending_hits = [t for t in self._pending_hits if cutoff <= t <= monotonic_seconds]
+
+        if self._pending_anchor is not None and candidate.distance_to(self._pending_anchor) <= self.base_match_radius_px:
+            self._pending_anchor = candidate
+            self._pending_hits.append(monotonic_seconds)
+        else:
+            self._pending_anchor = candidate
+            self._pending_hits = [monotonic_seconds]
+
+        if len(self._pending_hits) >= self.acquisition_confirm_frames:
+            self._reset_pending()
+            return True
+        return False
 
     def enable(self) -> None:
         """Enable tracking (transitions from DISABLED/AMBIGUOUS to ACQUIRING)."""
@@ -77,6 +120,7 @@ class PerformerTracker:
             self.active_subject = None
             self._held_subject = None
             self._last_seen_monotonic = None
+            self._reset_pending()
 
     def disable(self) -> None:
         """Disable tracking immediately (fail-closed / stop)."""
@@ -84,6 +128,7 @@ class PerformerTracker:
         self.active_subject = None
         self._held_subject = None
         self._last_seen_monotonic = None
+        self._reset_pending()
 
     def confirm_subject(self, box: Optional[BoundingBox] = None,
                         monotonic_seconds: float = 0.0) -> bool:
@@ -95,11 +140,12 @@ class PerformerTracker:
             return False
 
         if box is not None:
-            if not self.stage_polygon.contains_box(box):
+            if self._is_excluded(box) or not self.stage_polygon.contains_box(box):
                 return False
             self.active_subject = box
             self._held_subject = box
             self._last_seen_monotonic = monotonic_seconds
+            self._reset_pending()
             self.state = TrackingState.TRACKING
             return True
 
@@ -119,11 +165,12 @@ class PerformerTracker:
         """
         if self.state == TrackingState.DISABLED:
             return False
-        if not self.stage_polygon.contains_box(box):
+        if self._is_excluded(box) or not self.stage_polygon.contains_box(box):
             return False
         self.active_subject = box
         self._held_subject = box
         self._last_seen_monotonic = monotonic_seconds
+        self._reset_pending()
         self.state = TrackingState.TRACKING
         return True
 
@@ -157,11 +204,14 @@ class PerformerTracker:
 
         events: List[str] = []
 
-        # 1. Filter out offstage bystanders, floor objects/pets, and low-confidence detections
+        # 1. Filter out offstage bystanders, static exclusion zones, floor objects/pets, and low-confidence detections
         onstage_boxes: List[BoundingBox] = []
         offstage_count = 0
         for box in detections:
             if box.confidence < self.min_confidence:
+                continue
+            if self._is_excluded(box):
+                offstage_count += 1
                 continue
             if self.max_performer_y is not None and box.center_y > self.max_performer_y:
                 offstage_count += 1
@@ -186,25 +236,33 @@ class PerformerTracker:
             ]
 
             if plausible_matches:
-                # Match closest plausible box
                 matched = min(plausible_matches, key=lambda b: b.distance_to(anchor))
-                self.active_subject = matched
-                self._held_subject = matched
-                self._last_seen_monotonic = monotonic_seconds
+                if self.state == TrackingState.HOLDING and self.reacquire_confirm_frames > 1:
+                    self._holding_reacquire_hits += 1
+                else:
+                    self._holding_reacquire_hits = self.reacquire_confirm_frames
 
-                if self.state in (TrackingState.HOLDING, TrackingState.LOST, TrackingState.AMBIGUOUS):
-                    events.append("camera_subject_reacquired")
-                self.state = TrackingState.TRACKING
+                if self._holding_reacquire_hits >= self.reacquire_confirm_frames:
+                    self._holding_reacquire_hits = 0
+                    self.active_subject = matched
+                    self._held_subject = matched
+                    self._last_seen_monotonic = monotonic_seconds
 
-                return TrackingResult(
-                    state=self.state,
-                    active_subject=self.active_subject,
-                    events=events,
-                    onstage_count=onstage_count,
-                    offstage_count=offstage_count,
-                )
+                    if self.state in (TrackingState.HOLDING, TrackingState.LOST, TrackingState.AMBIGUOUS):
+                        events.append("camera_subject_reacquired")
+                    self.state = TrackingState.TRACKING
 
-            # No plausible candidate matches active subject (performer vanished, occluded, or jumped)
+                    return TrackingResult(
+                        state=self.state,
+                        active_subject=self.active_subject,
+                        events=events,
+                        onstage_count=onstage_count,
+                        offstage_count=offstage_count,
+                    )
+            else:
+                self._holding_reacquire_hits = 0
+
+            # No confirmed match for active subject (performer vanished, occluded, or single-frame noise during hold)
             if self._last_seen_monotonic is not None:
                 time_lost = monotonic_seconds - self._last_seen_monotonic
                 if time_lost <= self.loss_hold_seconds:
@@ -222,6 +280,7 @@ class PerformerTracker:
                         events.append("camera_subject_lost")
                     self.state = TrackingState.LOST
                     self.active_subject = None
+                    self._holding_reacquire_hits = 0
                     return TrackingResult(
                         state=TrackingState.LOST,
                         active_subject=None,
@@ -242,9 +301,6 @@ class PerformerTracker:
                             b for b in onstage_boxes
                             if b.distance_to(self._held_subject) <= reacquire_radius
                         ]
-                        # Safe reacquisition criteria:
-                        # 1. Exactly one solitary performer on stage rug (cannot steal from anyone else)
-                        # 2. Or multiple on stage, but exactly one matches proximity to the held performer
                         chosen = None
                         if len(onstage_boxes) == 1:
                             chosen = onstage_boxes[0]
@@ -252,6 +308,14 @@ class PerformerTracker:
                             chosen = matches[0]
 
                         if chosen is not None:
+                            if not self._check_acquisition_persistence(chosen, monotonic_seconds):
+                                return TrackingResult(
+                                    state=self.state,
+                                    active_subject=None,
+                                    events=[],
+                                    onstage_count=onstage_count,
+                                    offstage_count=offstage_count,
+                                )
                             self.active_subject = chosen
                             self._held_subject = chosen
                             self._last_seen_monotonic = monotonic_seconds
@@ -266,7 +330,6 @@ class PerformerTracker:
                             )
 
                     # Default policy: Proximity is NOT proof of identity after extended loss.
-                    # Must require explicit host confirmation rather than silently tracking someone.
                     self.state = TrackingState.AMBIGUOUS
                     events.append("performer_confirmation_required")
                     return TrackingResult(
@@ -277,10 +340,9 @@ class PerformerTracker:
                         offstage_count=offstage_count,
                     )
 
-            # Subcase B2: Initial acquisition (state is ACQUIRING)
+            # Subcase B2: Initial acquisition (state is ACQUIRING, or LOST with require_confirmation_after_loss=False)
+            was_lost_or_ambig = self.state in (TrackingState.LOST, TrackingState.AMBIGUOUS)
             if len(onstage_boxes) > 1:
-                # Ambiguous initial state: multiple people on stage at start!
-                # Do NOT pick largest face; require host confirmation.
                 self.state = TrackingState.AMBIGUOUS
                 events.append("performer_confirmation_required")
                 return TrackingResult(
@@ -291,13 +353,22 @@ class PerformerTracker:
                     offstage_count=offstage_count,
                 )
 
-            # Exactly one unambiguous performer on stage
+            # Exactly one unambiguous performer on stage: apply persistence gate if configured
             chosen = onstage_boxes[0]
+            if not self._check_acquisition_persistence(chosen, monotonic_seconds):
+                return TrackingResult(
+                    state=self.state,
+                    active_subject=None,
+                    events=[],
+                    onstage_count=onstage_count,
+                    offstage_count=offstage_count,
+                )
+
             self.active_subject = chosen
             self._held_subject = chosen
             self._last_seen_monotonic = monotonic_seconds
             self.state = TrackingState.TRACKING
-            events.append("camera_subject_acquired")
+            events.append("camera_subject_reacquired" if was_lost_or_ambig else "camera_subject_acquired")
             return TrackingResult(
                 state=self.state,
                 active_subject=self.active_subject,
@@ -306,7 +377,13 @@ class PerformerTracker:
                 offstage_count=offstage_count,
             )
 
-        # No onstage boxes detected
+        # No onstage boxes detected: prune expired pending hits outside rolling window
+        if self._pending_hits:
+            cutoff = monotonic_seconds - self.acquisition_window_seconds
+            self._pending_hits = [t for t in self._pending_hits if cutoff <= t <= monotonic_seconds]
+            if not self._pending_hits:
+                self._pending_anchor = None
+
         if self.state not in (TrackingState.LOST, TrackingState.AMBIGUOUS):
             self.state = TrackingState.ACQUIRING
 

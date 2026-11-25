@@ -19,7 +19,9 @@
     "fade_speed": 0.04,
     "style": "feathered",
     "show_label": true,
-    "label": "PARKING LOT CENTER"
+    "label": "PARKING LOT CENTER",
+    "crop_osd": true,
+    "temporal_smooth": true
   },
   "wall_overlay": {
     "enabled": false,

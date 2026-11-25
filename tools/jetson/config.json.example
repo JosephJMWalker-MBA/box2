@@ -14,5 +14,9 @@
   "bitrate": "2500k",
   "headroom_fraction": 0.50,
   "target_face_fraction": 0.28,
-  "max_zoom": 2.6
+  "max_zoom": 2.6,
+  "stage_left_x_640": 12,
+  "stage_right_x_640": 515,
+  "loss_hold_seconds": 6.0,
+  "acquisition_confirm_frames": 4
 }

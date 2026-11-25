@@ -180,6 +180,26 @@ class CameraFeedWallOverlayTests(unittest.TestCase):
         center_y = self.overlay.y + self.overlay.height // 2
         self.assertGreater(frame[center_y, center_x, 0], 50)
 
+    def test_temporal_deflicker_damps_keyframe_jump_while_preserving_motion(self):
+        """Motion-adaptive EMA damps small 4s H.264 I-frame jumps (>70%) while passing car motion crisply."""
+        base = np.full((360, 640, 3), 80, dtype=np.uint8)
+        f0 = self.overlay._preprocess_cam_frame(base)
+        self.assertEqual(f0.shape, (191, 340, 3))
+        self.assertEqual(int(f0.mean()), 80)
+
+        # Simulate +5 gray-level H.264 keyframe quantization pop across static background
+        popped = np.full((360, 640, 3), 85, dtype=np.uint8)
+        f1 = self.overlay._preprocess_cam_frame(popped)
+        # Jump must be damped from +5 down to <= +2
+        self.assertLessEqual(float(f1.mean()) - 80.0, 2.0)
+
+        # Simulate bright car headlights entering center of parking lot (+120 delta > 22 motion threshold)
+        car = base.copy()
+        car[160:220, 280:360] = 200
+        f_car = self.overlay._preprocess_cam_frame(car)
+        # Moving car pixels pass through at full intensity without ghost damping
+        self.assertGreater(int(f_car.max()), 195)
+
 
 if __name__ == "__main__":
     unittest.main()

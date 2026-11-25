@@ -193,6 +193,69 @@ class TrackingTests(unittest.TestCase):
         self.assertEqual(res_human.onstage_count, 1)
         self.assertEqual(res_human.offstage_count, 1)
 
+    def test_exclusion_boxes_reject_wall_portrait_poster(self):
+        """Static portrait artwork inside exclusion zone is rejected and never tracked."""
+        stage_640 = StagePolygon([(12.0, 20.0), (515.0, 20.0), (515.0, 315.0), (12.0, 315.0)])
+        portrait_zone = BoundingBox(x=530.0, y=105.0, width=110.0, height=145.0)
+        # Also test an exclusion zone even inside the stage polygon (e.g. door photo)
+        door_photo_zone = BoundingBox(x=305.0, y=90.0, width=55.0, height=60.0)
+        tracker = PerformerTracker(
+            stage_640,
+            exclusion_boxes=[portrait_zone, door_photo_zone],
+        )
+        tracker.enable()
+
+        # Right-wall Jesus poster detection at (573, 138, 53, 53)
+        poster_box = BoundingBox(x=573.0, y=138.0, width=53.0, height=53.0)
+        door_box = BoundingBox(x=315.0, y=100.0, width=35.0, height=35.0)
+        res = tracker.update([poster_box, door_box], monotonic_seconds=1.0)
+        self.assertEqual(res.state, TrackingState.ACQUIRING)
+        self.assertIsNone(res.active_subject)
+        self.assertEqual(res.onstage_count, 0)
+        self.assertEqual(res.offstage_count, 2)
+
+    def test_temporal_persistence_gate_blocks_keyframe_blips_and_acquires_performer(self):
+        """4-second H.264 I-frame 1-frame blips never lock, while a real performer locks in 4 frames."""
+        stage_640 = StagePolygon([(12.0, 20.0), (515.0, 20.0), (515.0, 315.0), (12.0, 315.0)])
+        tracker = PerformerTracker(
+            stage_640,
+            loss_hold_seconds=6.0,
+            base_match_radius_px=85.0,
+            require_confirmation_after_loss=False,
+            acquisition_confirm_frames=4,
+            acquisition_window_seconds=1.2,
+            reacquire_confirm_frames=2,
+        )
+        tracker.enable()
+
+        blip = BoundingBox(x=250.0, y=120.0, width=40.0, height=40.0)
+        # Simulate 1-frame keyframe blips every 4.0 seconds over 20 seconds
+        for cycle in range(5):
+            t_blip = cycle * 4.0
+            res_blip = tracker.update([blip], monotonic_seconds=t_blip)
+            self.assertEqual(res_blip.state, TrackingState.ACQUIRING)
+            self.assertIsNone(res_blip.active_subject)
+            for f in range(1, 40):
+                res_empty = tracker.update([], monotonic_seconds=t_blip + f * 0.1)
+                self.assertEqual(res_empty.state, TrackingState.ACQUIRING)
+
+        # Now real performer walks onto stage at t=30.0 (4 consecutive frames at 10 FPS = 0.3s)
+        for i in range(3):
+            r = tracker.update([BoundingBox(x=230.0 + i * 2, y=115.0, width=42.0, height=42.0)], monotonic_seconds=30.0 + i * 0.1)
+            self.assertEqual(r.state, TrackingState.ACQUIRING)
+        r4 = tracker.update([BoundingBox(x=236.0, y=115.0, width=42.0, height=42.0)], monotonic_seconds=30.3)
+        self.assertEqual(r4.state, TrackingState.TRACKING)
+        self.assertIsNotNone(r4.active_subject)
+
+        # Performer steps off stage -> enters HOLDING; a single stray 1-frame blip does NOT reset hold timer
+        r_hold = tracker.update([], monotonic_seconds=31.0)
+        self.assertEqual(r_hold.state, TrackingState.HOLDING)
+        r_stray = tracker.update([BoundingBox(x=236.0, y=115.0, width=42.0, height=42.0)], monotonic_seconds=34.0)
+        self.assertEqual(r_stray.state, TrackingState.HOLDING)
+        # At t=36.5 (> 6.0s since last confirmed 30.3s), cleanly transitions to LOST so camera returns wide
+        r_lost = tracker.update([], monotonic_seconds=36.5)
+        self.assertEqual(r_lost.state, TrackingState.LOST)
+
 
 if __name__ == "__main__":
     unittest.main()

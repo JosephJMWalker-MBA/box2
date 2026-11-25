@@ -539,7 +539,9 @@ class WallOverlay:
 class CameraFeedWallOverlay:
     """Live secondary camera feed (e.g. Parking Lot Center) projected onto the dark stage wall.
     - Soft feathered edge projection or framed broadcast PIP
-    - Fades smoothly to 0.0 opacity when a performer is detected/framed
+    - Clean OSD watermark crop + anti-aliased INTER_AREA downscaling
+    - Motion-adaptive temporal EMA de-flicker filter (absorbs H.264 4s keyframe pop without motion blur)
+    - Fades smoothly to 0.0 opacity when a performer is confirmed/framed or camera zooms in
     - Background worker thread with auto-reconnect and token refresh
     - Live hot-reloading from ticker.json ("parking_lot_camera")
     """
@@ -559,9 +561,14 @@ class CameraFeedWallOverlay:
         self.style = "feathered"  # "feathered" or "framed"
         self.show_label = True
         self.label = "PARKING LOT CENTER"
+        self.crop_osd = True
+        # Normalized crop (x1, y1, x2, y2) removing Reolink logo, top ticking clock, and bottom OSD
+        self.src_crop_norm = (0.105, 0.144, 0.894, 0.933)
+        self.temporal_smooth = True
         
         self.current_opacity = 0.65
         self.latest_frame = None
+        self._ema_frame = None
         self._lock = threading.Lock()
         self._running = True
         self.last_check = 0
@@ -587,6 +594,33 @@ class CameraFeedWallOverlay:
             mask[:, self.width - 1 - i] *= f
         self._feather_mask = mask[:, :, np.newaxis]
 
+    def _preprocess_cam_frame(self, raw_frame):
+        """Crop OSD clutter, downsample with INTER_AREA, and apply motion-adaptive temporal de-flicker."""
+        fh, fw = raw_frame.shape[:2]
+        if self.crop_osd and fw >= 160 and fh >= 90:
+            nx1, ny1, nx2, ny2 = self.src_crop_norm
+            cx1 = max(0, min(fw - 16, int(round(fw * nx1))))
+            cy1 = max(0, min(fh - 9, int(round(fh * ny1))))
+            cx2 = max(cx1 + 16, min(fw, int(round(fw * nx2))))
+            cy2 = max(cy1 + 9, min(fh, int(round(fh * ny2))))
+            raw_frame = raw_frame[cy1:cy2, cx1:cx2]
+
+        resized = cv2.resize(raw_frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
+        if not self.temporal_smooth:
+            self._ema_frame = None
+            return resized
+
+        resized_f = resized.astype(np.float32)
+        if self._ema_frame is None or self._ema_frame.shape != resized_f.shape:
+            self._ema_frame = resized_f
+        else:
+            diff = np.max(np.abs(resized_f - self._ema_frame), axis=2, keepdims=True)
+            # Smooth static background (alpha=0.28 damps >70% of 4s H.264 I-frame pop & IR grain),
+            # while passing real motion (cars, headlights, pedestrians: diff > 22) crisply with zero ghosting
+            alpha = np.where(diff > 22.0, 1.0, np.where(diff > 12.0, 0.65, 0.28)).astype(np.float32)
+            self._ema_frame = self._ema_frame + alpha * (resized_f - self._ema_frame)
+        return np.clip(self._ema_frame, 0.0, 255.0).astype(np.uint8)
+
     def _worker(self):
         time.sleep(2.0)
         fail_count = 0
@@ -609,8 +643,9 @@ class CameraFeedWallOverlay:
                         time.sleep(0.05)
                         continue
                     fail_count = 0
+                    processed = self._preprocess_cam_frame(frame)
                     with self._lock:
-                        self.latest_frame = frame
+                        self.latest_frame = processed
                 cap.release()
             except Exception:
                 time.sleep(2.0)
@@ -643,12 +678,17 @@ class CameraFeedWallOverlay:
             if new_w != self.width or new_h != self.height:
                 self.width = new_w
                 self.height = new_h
+                self._ema_frame = None
                 self._build_feather_mask()
             self.max_opacity = float(cfg.get("max_opacity", 0.65))
             self.fade_speed = float(cfg.get("fade_speed", 0.04))
             self.style = cfg.get("style", "feathered")
             self.show_label = cfg.get("show_label", True)
             self.label = cfg.get("label", "PARKING LOT CENTER")
+            self.crop_osd = bool(cfg.get("crop_osd", True))
+            if "src_crop_norm" in cfg and len(cfg["src_crop_norm"]) == 4:
+                self.src_crop_norm = tuple(float(v) for v in cfg["src_crop_norm"])
+            self.temporal_smooth = bool(cfg.get("temporal_smooth", True))
         except Exception:
             pass
 
@@ -678,22 +718,30 @@ class CameraFeedWallOverlay:
         if x2 > frame_bgr.shape[1] or y2 > frame_bgr.shape[0]:
             return
 
-        cam_resized = cv2.resize(cam_frame, (self.width, self.height))
+        if cam_frame.shape[1] != self.width or cam_frame.shape[0] != self.height:
+            cam_resized = cv2.resize(cam_frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
+        else:
+            cam_resized = cam_frame
 
         if self.style == "feathered":
             eff_alpha = self._feather_mask * self.current_opacity
             wall_slice = frame_bgr[y1:y2, x1:x2]
             frame_bgr[y1:y2, x1:x2] = ((1.0 - eff_alpha) * wall_slice + eff_alpha * cam_resized).astype(np.uint8)
 
-            if self.show_label:
+            if self.show_label and y1 >= 26:
                 font = cv2.FONT_HERSHEY_DUPLEX
                 (tw, th), _ = cv2.getTextSize(self.label, font, 0.45, 1)
-                label_x = x1 + (self.width - tw) // 2
+                label_x = max(0, x1 + (self.width - tw) // 2)
                 label_y = y1 - 8
-                label_alpha = min(1.0, self.current_opacity * 1.3)
-                overlay = frame_bgr.copy()
-                cv2.putText(overlay, self.label, (label_x, label_y), font, 0.45, (200, 205, 210), 1)
-                cv2.addWeighted(overlay, label_alpha, frame_bgr, 1.0 - label_alpha, 0, frame_bgr)
+                ly1 = max(0, label_y - th - 6)
+                ly2 = min(frame_bgr.shape[0], label_y + 6)
+                lx1 = max(0, label_x - 4)
+                lx2 = min(frame_bgr.shape[1], label_x + tw + 6)
+                if ly2 > ly1 and lx2 > lx1:
+                    label_alpha = min(1.0, self.current_opacity * 1.3)
+                    label_roi = frame_bgr[ly1:ly2, lx1:lx2].copy()
+                    cv2.putText(label_roi, self.label, (label_x - lx1, label_y - ly1), font, 0.45, (200, 205, 210), 1)
+                    cv2.addWeighted(label_roi, label_alpha, frame_bgr[ly1:ly2, lx1:lx2], 1.0 - label_alpha, 0, frame_bgr[ly1:ly2, lx1:lx2])
 
         elif self.style == "framed":
             wall_slice = frame_bgr[y1:y2, x1:x2]
@@ -753,17 +801,31 @@ class DirectorStream:
         self.last_valid_frame = test_frame.copy()
         src_h, src_w = test_frame.shape[:2]
 
-        # Stage polygon & floor rejection (covers elevated T-stage surface down to y=315 for floor work / sit-ups)
+        # Stage polygon & static wall-art exclusion:
+        # Covers the elevated T-stage surface, stool, rugs, doorway, and jukebox front (x=12..515, y=20..315 on 640x360),
+        # while strictly excluding the right offstage laundry wall / pipe / portrait poster (x >= 520).
         scale_x = src_w / 640.0
         scale_y = src_h / 360.0
-        floor_cutoff_y = int(315 * scale_y)
+        floor_cutoff_y = int(cfg.get("floor_cutoff_y_640", 315) * scale_y)
+        stage_left_x = int(cfg.get("stage_left_x_640", 12) * scale_x)
+        stage_right_x = int(cfg.get("stage_right_x_640", 515) * scale_x)
+        stage_top_y = int(cfg.get("stage_top_y_640", 20) * scale_y)
         stage_vertices = [
-            (int(5 * scale_x), int(20 * scale_y)),
-            (int((640 - 5) * scale_x), int(20 * scale_y)),
-            (int((640 - 5) * scale_x), floor_cutoff_y),
-            (int(5 * scale_x), floor_cutoff_y),
+            (stage_left_x, stage_top_y),
+            (stage_right_x, stage_top_y),
+            (stage_right_x, floor_cutoff_y),
+            (stage_left_x, floor_cutoff_y),
         ]
         self.stage_polygon = StagePolygon(vertices=stage_vertices)
+        # Explicit defense-in-depth exclusion zone over the right-wall portrait poster
+        self.exclusion_boxes = [
+            BoundingBox(
+                x=float(530 * scale_x),
+                y=float(105 * scale_y),
+                width=float(110 * scale_x),
+                height=float(145 * scale_y),
+            )
+        ]
         self.floor_cutoff_y = floor_cutoff_y
         self.src_w = src_w
         self.src_h = src_h
@@ -794,10 +856,16 @@ class DirectorStream:
         )
         tracker = PerformerTracker(
             stage_polygon=self.stage_polygon,
-            loss_hold_seconds=cfg.get("loss_hold_seconds", 15.0),
+            loss_hold_seconds=cfg.get("loss_hold_seconds", 6.0),
+            base_match_radius_px=cfg.get("base_match_radius_px", 85.0 * scale_x),
+            max_performer_speed_px_s=cfg.get("max_performer_speed_px_s", 260.0 * scale_x),
             allow_proximity_reacquisition=True,
             require_confirmation_after_loss=False,
             max_performer_y=float(floor_cutoff_y),
+            exclusion_boxes=self.exclusion_boxes,
+            acquisition_confirm_frames=int(cfg.get("acquisition_confirm_frames", 4)),
+            acquisition_window_seconds=float(cfg.get("acquisition_window_seconds", 1.2)),
+            reacquire_confirm_frames=int(cfg.get("reacquire_confirm_frames", 2)),
         )
         self.adapter = StageFramingAdapter(
             config=framing_config,
@@ -919,12 +987,12 @@ class DirectorStream:
                 try:
                     new_token = nvr_login(self.ip, self.cfg)
                     with self.token_lock:
-                        old_token = self.token
                         self.token = new_token
                         self.last_token_renew = time.monotonic()
                     log("Stage Director: proactively renewed NVR session token (lease extended)")
-                    if old_token:
-                        threading.Thread(target=nvr_logout, args=(self.ip, old_token), daemon=True).start()
+                    # Do NOT forcibly Logout old_token immediately: active HTTP FLV readers
+                    # (cam2_overlay / ffmpeg audio) may still hold sockets opened under it;
+                    # letting old_token expire naturally avoids mid-stream reconnect blips.
                 except Exception as exc:
                     log(f"Stage Director token renewal warning: {scrub(str(exc), self.secrets)}")
 
@@ -1010,13 +1078,21 @@ class DirectorStream:
                             width=float(fw * sx),
                             height=float(fh * sy),
                         )
-                        if bbox.center_y <= self.floor_cutoff_y and self.stage_polygon.contains_box(bbox):
+                        if (
+                            bbox.center_y <= self.floor_cutoff_y
+                            and not self.adapter.tracker._is_excluded(bbox)
+                            and self.stage_polygon.contains_box(bbox)
+                        ):
                             candidate_boxes.append(bbox)
                             onstage_count += 1
 
-                    # Auto-confirm performer when available and tracker needs acquisition
-                    if self.adapter.tracker.state.value in ("acquiring", "ambiguous", "lost") and candidate_boxes:
-                        self.adapter.confirm_subject(candidate_boxes[0], cur_mono)
+                    # Let PerformerTracker.update() enforce the multi-frame acquisition_confirm_frames
+                    # persistence gate for single performers; only resolve simultaneous multi-person
+                    # ambiguity once the primary candidate also satisfies persistence.
+                    if self.adapter.tracker.state.value == "ambiguous" and candidate_boxes:
+                        primary = max(candidate_boxes, key=lambda b: b.area)
+                        if self.adapter.tracker._check_acquisition_persistence(primary, cur_mono):
+                            self.adapter.confirm_subject(primary, cur_mono)
 
                     proposal = self.adapter.process_frame(candidate_boxes, cur_utc, cur_mono)
 
@@ -1043,8 +1119,14 @@ class DirectorStream:
                 else:
                     rendered = cv2.resize(frame, (self.out_w, self.out_h), interpolation=cv2.INTER_AREA)
 
-                # Subtle painted wall / parking lot camera overlay (fades to 0 when performer is on stage)
-                is_performer_framed = (proposal.tracking_state == "tracking") or (onstage_count > 0)
+                # Subtle painted wall / parking lot camera overlay:
+                # Stays steady on empty wide stage (ignoring unconfirmed 1-frame blips),
+                # and stays smoothly faded to 0 throughout tracking, holding, and zoom-out transitions.
+                zoom_factor = (proposal.framing or {}).get("zoom_factor", 1.0)
+                is_performer_framed = (
+                    proposal.tracking_state in ("tracking", "holding")
+                    or zoom_factor > 1.05
+                )
                 if self.cam2_overlay is not None and self.cam2_overlay.enabled:
                     self.cam2_overlay.draw(rendered, is_performer_framed=is_performer_framed)
                 else:

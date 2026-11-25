@@ -25,9 +25,13 @@ if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     sudo apt-get install -y -qq "${MISSING_PKGS[@]}" python3-opencv python3-pil python3-numpy
 fi
 
-# 2. Setup target runtime directory
-echo "[2/6] Setting up runtime directory at ${TARGET_DIR}..."
-mkdir -p "${TARGET_DIR}"
+# 2. Setup target runtime directory and Stage Director package
+echo "[2/6] Setting up runtime directories at ${TARGET_DIR} and ${HOME}/stage-director..."
+mkdir -p "${TARGET_DIR}" "${HOME}/stage-director/stage_director"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+if [ -d "${REPO_ROOT}/stage_director" ]; then
+    cp -r "${REPO_ROOT}/stage_director/"* "${HOME}/stage-director/stage_director/"
+fi
 
 # 3. Deploy main streaming script
 echo "[3/6] Deploying box2_stream.py..."
