@@ -20,5 +20,7 @@
   "loss_hold_seconds": 6.0,
   "acquisition_confirm_frames": 4,
   "stage_resting_preset_id": 16,
-  "privacy_preset_id": 17
+  "privacy_preset_id": 17,
+  "show_start_hour": 21,
+  "show_end_hour": 2
 }

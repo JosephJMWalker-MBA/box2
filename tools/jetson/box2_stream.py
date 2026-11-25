@@ -78,14 +78,34 @@ def desired():
         return 'off'
 
 
-def desired_view(ticker_path="/home/joseph1/box2-stream/ticker.json"):
-    """Return 'privacy' (Box 2 wall placeholder) or 'stage' (normal Stage Director)."""
+def is_within_show_hours(now_dt=None, start_hour=21, end_hour=2):
+    """Return True if local time falls inside the active live stage window (default 9:00 PM - 2:00 AM)."""
+    if now_dt is None:
+        now_dt = datetime.now()
+    h = now_dt.hour
+    start_hour = int(start_hour) % 24
+    end_hour = int(end_hour) % 24
+    if start_hour == end_hour:
+        return True
+    if start_hour < end_hour:
+        return start_hour <= h < end_hour
+    return h >= start_hour or h < end_hour
+
+
+def view_policy():
     try:
-        st = json.loads(STATE.read_text())
-        if st.get('view') in ('privacy', 'standby', 'brb'):
+        v = json.loads(STATE.read_text()).get('view', 'auto')
+        if v in ('privacy', 'standby', 'brb'):
             return 'privacy'
+        if v == 'stage':
+            return 'stage'
     except (OSError, ValueError):
         pass
+    return 'auto'
+
+
+def desired_view(ticker_path="/home/joseph1/box2-stream/ticker.json", now_dt=None, start_hour=21, end_hour=2):
+    """Resolve active view ('privacy' vs 'stage') from explicit overrides or the 9PM-2AM schedule."""
     try:
         if os.path.exists(ticker_path):
             tk = json.loads(Path(ticker_path).read_text())
@@ -93,7 +113,13 @@ def desired_view(ticker_path="/home/joseph1/box2-stream/ticker.json"):
                 return 'privacy'
     except (OSError, ValueError):
         pass
-    return 'stage'
+
+    pol = view_policy()
+    if pol == 'privacy':
+        return 'privacy'
+    if pol == 'stage':
+        return 'stage'
+    return 'stage' if is_within_show_hours(now_dt=now_dt, start_hour=start_hour, end_hour=end_hour) else 'privacy'
 
 
 # ----- finding and logging in to the NVR -----
@@ -808,11 +834,21 @@ class DirectorStream:
         self.last_progress = self.started
         self.stage_preset_id = int(cfg.get("stage_resting_preset_id", 16))
         self.privacy_preset_id = int(cfg.get("privacy_preset_id", 17))
-        self.current_view_mode = desired_view()
+        self.show_start_hour = int(cfg.get("show_start_hour", 21))
+        self.show_end_hour = int(cfg.get("show_end_hour", 2))
+        self.current_view_mode = desired_view(start_hour=self.show_start_hour, end_hour=self.show_end_hour)
         self._last_view_check = 0.0
         self._ptz_slew_until = 0.0
         self._held_canvas = None
-        self.stats = {'frame': 0, 'fps': 0.0, 'bitrate': '', 'out_time': '00:00:00', 'mode': 'director', 'view': self.current_view_mode}
+        self.stats = {
+            'frame': 0,
+            'fps': 0.0,
+            'bitrate': '',
+            'out_time': '00:00:00',
+            'mode': 'director',
+            'view': self.current_view_mode,
+            'view_policy': f"{view_policy()} ({self.show_start_hour:02d}:00-{self.show_end_hour:02d}:00 stage)",
+        }
         self.errors = []
         self._stop_event = threading.Event()
 
@@ -1171,7 +1207,8 @@ class DirectorStream:
                 # Poll desired view mode ('stage' vs 'privacy' Box 2 placeholder) every 0.5s without dropping stream
                 if cur_mono - self._last_view_check >= 0.5:
                     self._last_view_check = cur_mono
-                    target_view = desired_view()
+                    target_view = desired_view(start_hour=self.show_start_hour, end_hour=self.show_end_hour)
+                    self.stats['view_policy'] = f"{view_policy()} ({self.show_start_hour:02d}:00-{self.show_end_hour:02d}:00 stage)"
                     if target_view != self.current_view_mode:
                         log(f"Stage Director view transition: {self.current_view_mode} -> {target_view}")
                         if target_view == "privacy":
@@ -1470,20 +1507,26 @@ def run():
 def main():
     command = sys.argv[1] if len(sys.argv) > 1 else 'status'
     if command in ('on', 'test', 'off'):
-        write_json(STATE, {'desired': command, 'view': 'stage', 'set': now()})
-        print({'on': 'Going live (stage view): the Orin will stream to Twitch within a few seconds.',
+        write_json(STATE, {'desired': command, 'view': 'auto', 'set': now()})
+        print({'on': 'Going live (auto schedule: privacy until 9PM, Stage Director 9PM-2AM): streaming to Twitch.',
                'test': 'Twitch bandwidth test: the Orin streams to Twitch without going live.',
                'off': 'Stream off.'}[command])
+    elif command == 'auto':
+        cur_desired = desired()
+        target_desired = cur_desired if cur_desired in ('on', 'test') else 'on'
+        write_json(STATE, {'desired': target_desired, 'view': 'auto', 'set': now()})
+        cur_v = desired_view()
+        print(f'Auto schedule ON (Stage Director 9:00 PM - 2:00 AM EST, Privacy Standby 2:00 AM - 9:00 PM EST). Current active view: {cur_v}.')
     elif command in ('privacy', 'standby', 'brb'):
         cur_desired = desired()
         target_desired = cur_desired if cur_desired in ('on', 'test') else 'on'
         write_json(STATE, {'desired': target_desired, 'view': 'privacy', 'set': now()})
-        print('Privacy placeholder ON: camera zooming to Box 2 wall sign (Preset 17). Room hidden; Twitch stream stays live.')
+        print('Manual override: Privacy placeholder ON (Box 2 wall sign + bottom-left parking lot). Run "box2_stream.py auto" to resume 9PM-2AM schedule.')
     elif command == 'stage':
         cur_desired = desired()
         target_desired = cur_desired if cur_desired in ('on', 'test') else 'on'
         write_json(STATE, {'desired': target_desired, 'view': 'stage', 'set': now()})
-        print('Stage view ON: camera returning to Stage Resting (Preset 16) and resuming Stage Director.')
+        print('Manual override: Stage view ON (Preset 16 + Stage Director). Run "box2_stream.py auto" to resume 9PM-2AM schedule.')
     elif command == 'status':
         try:
             print(STATUS.read_text())

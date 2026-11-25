@@ -204,16 +204,26 @@ class StreamResilienceTests(unittest.TestCase):
                     json.dump({"privacy_placeholder": {"enabled": False}}, f)
                 self.assertEqual(b2s.desired_view(tk_path), "stage")
 
-                # CLI `box2-stream privacy` sets view='privacy' while preserving desired='on'
+                # Auto schedule (default): 9:00 PM (21:00) to 2:00 AM (02:00) is 'stage', daytime is 'privacy'
+                from datetime import datetime
+                b2s.STATE.write_text(json.dumps({"desired": "on", "view": "auto"}))
+                self.assertEqual(b2s.desired_view(tk_path, now_dt=datetime(2026, 11, 25, 7, 36, 0)), "privacy")
+                self.assertEqual(b2s.desired_view(tk_path, now_dt=datetime(2026, 11, 25, 20, 59, 59)), "privacy")
+                self.assertEqual(b2s.desired_view(tk_path, now_dt=datetime(2026, 11, 25, 21, 0, 0)), "stage")
+                self.assertEqual(b2s.desired_view(tk_path, now_dt=datetime(2026, 11, 26, 0, 30, 0)), "stage")
+                self.assertEqual(b2s.desired_view(tk_path, now_dt=datetime(2026, 11, 26, 1, 59, 59)), "stage")
+                self.assertEqual(b2s.desired_view(tk_path, now_dt=datetime(2026, 11, 26, 2, 0, 0)), "privacy")
+
+                # CLI `box2-stream privacy` overrides even during 9PM-2AM show hours
                 b2s.STATE.write_text(json.dumps({"desired": "on", "view": "privacy"}))
                 self.assertEqual(b2s.desired(), "on")
-                self.assertEqual(b2s.desired_view(tk_path), "privacy")
+                self.assertEqual(b2s.desired_view(tk_path, now_dt=datetime(2026, 11, 25, 22, 0, 0)), "privacy")
 
                 # `ticker.json` hot-toggle also activates privacy view
                 b2s.STATE.write_text(json.dumps({"desired": "on", "view": "stage"}))
                 with open(tk_path, "w") as f:
                     json.dump({"privacy_placeholder": {"enabled": True}}, f)
-                self.assertEqual(b2s.desired_view(tk_path), "privacy")
+                self.assertEqual(b2s.desired_view(tk_path, now_dt=datetime(2026, 11, 25, 22, 0, 0)), "privacy")
             finally:
                 b2s.STATE = old_state
 
