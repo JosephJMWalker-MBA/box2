@@ -28,7 +28,10 @@
     "style": "fullbleed",
     "show_standby_badge": true,
     "badge_label": "STAGE STANDBY",
-    "show_cam2_in_privacy": false
+    "show_cam2_in_privacy": true,
+    "cam2_x": 26,
+    "cam2_y": 495,
+    "cam2_opacity": 0.78
   },
   "wall_overlay": {
     "enabled": false,

@@ -731,19 +731,23 @@ class CameraFeedWallOverlay:
         except Exception:
             pass
 
-    def draw(self, frame_bgr, is_performer_framed=False):
+    def draw(self, frame_bgr, is_performer_framed=False, pos_override=None, opacity_override=None):
         if not self.enabled:
             return
 
         self.reload_if_needed()
 
-        target_opacity = 0.0 if is_performer_framed else self.max_opacity
-        if self.current_opacity < target_opacity:
-            self.current_opacity = min(target_opacity, self.current_opacity + self.fade_speed)
-        elif self.current_opacity > target_opacity:
-            self.current_opacity = max(target_opacity, self.current_opacity - self.fade_speed)
+        if opacity_override is not None:
+            eff_opacity = float(opacity_override)
+        else:
+            target_opacity = 0.0 if is_performer_framed else self.max_opacity
+            if self.current_opacity < target_opacity:
+                self.current_opacity = min(target_opacity, self.current_opacity + self.fade_speed)
+            elif self.current_opacity > target_opacity:
+                self.current_opacity = max(target_opacity, self.current_opacity - self.fade_speed)
+            eff_opacity = self.current_opacity
 
-        if self.current_opacity <= 0.005:
+        if eff_opacity <= 0.005:
             return
 
         with self._lock:
@@ -752,9 +756,9 @@ class CameraFeedWallOverlay:
         if cam_frame is None:
             return
 
-        x1, y1 = self.x, self.y
+        x1, y1 = pos_override if pos_override is not None else (self.x, self.y)
         x2, y2 = x1 + self.width, y1 + self.height
-        if x2 > frame_bgr.shape[1] or y2 > frame_bgr.shape[0]:
+        if x1 < 0 or y1 < 0 or x2 > frame_bgr.shape[1] or y2 > frame_bgr.shape[0]:
             return
 
         if cam_frame.shape[1] != self.width or cam_frame.shape[0] != self.height:
@@ -763,7 +767,7 @@ class CameraFeedWallOverlay:
             cam_resized = cam_frame
 
         if self.style == "feathered":
-            eff_alpha = self._feather_mask * self.current_opacity
+            eff_alpha = self._feather_mask * eff_opacity
             wall_slice = frame_bgr[y1:y2, x1:x2]
             frame_bgr[y1:y2, x1:x2] = ((1.0 - eff_alpha) * wall_slice + eff_alpha * cam_resized).astype(np.uint8)
 
@@ -777,14 +781,14 @@ class CameraFeedWallOverlay:
                 lx1 = max(0, label_x - 4)
                 lx2 = min(frame_bgr.shape[1], label_x + tw + 6)
                 if ly2 > ly1 and lx2 > lx1:
-                    label_alpha = min(1.0, self.current_opacity * 1.3)
+                    label_alpha = min(1.0, eff_opacity * 1.3)
                     label_roi = frame_bgr[ly1:ly2, lx1:lx2].copy()
                     cv2.putText(label_roi, self.label, (label_x - lx1, label_y - ly1), font, 0.45, (200, 205, 210), 1)
                     cv2.addWeighted(label_roi, label_alpha, frame_bgr[ly1:ly2, lx1:lx2], 1.0 - label_alpha, 0, frame_bgr[ly1:ly2, lx1:lx2])
 
         elif self.style == "framed":
             wall_slice = frame_bgr[y1:y2, x1:x2]
-            frame_bgr[y1:y2, x1:x2] = cv2.addWeighted(cam_resized, self.current_opacity, wall_slice, 1.0 - self.current_opacity, 0)
+            frame_bgr[y1:y2, x1:x2] = cv2.addWeighted(cam_resized, eff_opacity, wall_slice, 1.0 - eff_opacity, 0)
             cv2.rectangle(frame_bgr, (x1 - 1, y1 - 1), (x2 + 1, y2 + 1), (70, 70, 80), 1)
             if self.show_label:
                 font = cv2.FONT_HERSHEY_DUPLEX
@@ -1197,10 +1201,21 @@ class DirectorStream:
 
                 if cur_mono < self._ptz_slew_until and self._held_canvas is not None:
                     rendered = self._held_canvas.copy()
+                    if self.current_view_mode == "privacy" and self.cam2_overlay is not None:
+                        p_cfg = self.ticker.data.get("privacy_placeholder", {})
+                        if p_cfg.get("show_cam2_in_privacy", True):
+                            px = int(p_cfg.get("cam2_x", 26))
+                            py = int(p_cfg.get("cam2_y", 495))
+                            pop = float(p_cfg.get("cam2_opacity", 0.78))
+                            self.cam2_overlay.draw(rendered, pos_override=(px, py), opacity_override=pop)
                 elif self.current_view_mode == "privacy":
                     rendered = self._render_privacy_canvas(frame)
-                    if self.cam2_overlay is not None and self.ticker.data.get("privacy_placeholder", {}).get("show_cam2_in_privacy", False):
-                        self.cam2_overlay.draw(rendered, is_performer_framed=False)
+                    p_cfg = self.ticker.data.get("privacy_placeholder", {})
+                    if self.cam2_overlay is not None and p_cfg.get("show_cam2_in_privacy", True):
+                        px = int(p_cfg.get("cam2_x", 26))
+                        py = int(p_cfg.get("cam2_y", 495))
+                        pop = float(p_cfg.get("cam2_opacity", 0.78))
+                        self.cam2_overlay.draw(rendered, pos_override=(px, py), opacity_override=pop)
                 else:
                     candidate_boxes = []
                     onstage_count = 0
