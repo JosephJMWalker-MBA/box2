@@ -181,6 +181,42 @@ class StreamResilienceTests(unittest.TestCase):
         self.assertEqual(len(urgent), 2)
         self.assertIn("SCHEDULED RESET IN 25s", urgent[0])
 
+    def test_privacy_view_mode_resolution(self):
+        """Verifies zero-drop privacy/stage view mode resolution from state.json and ticker.json."""
+        import json
+        import os
+        import tempfile
+        try:
+            import tools.jetson.box2_stream as b2s
+        except ImportError:
+            import sys
+            sys.path.insert(0, "/home/joseph1/box2-stream")
+            import box2_stream as b2s
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old_state = b2s.STATE
+            try:
+                b2s.STATE = b2s.Path(os.path.join(tmp, "state.json"))
+                tk_path = os.path.join(tmp, "ticker.json")
+
+                b2s.STATE.write_text(json.dumps({"desired": "on", "view": "stage"}))
+                with open(tk_path, "w") as f:
+                    json.dump({"privacy_placeholder": {"enabled": False}}, f)
+                self.assertEqual(b2s.desired_view(tk_path), "stage")
+
+                # CLI `box2-stream privacy` sets view='privacy' while preserving desired='on'
+                b2s.STATE.write_text(json.dumps({"desired": "on", "view": "privacy"}))
+                self.assertEqual(b2s.desired(), "on")
+                self.assertEqual(b2s.desired_view(tk_path), "privacy")
+
+                # `ticker.json` hot-toggle also activates privacy view
+                b2s.STATE.write_text(json.dumps({"desired": "on", "view": "stage"}))
+                with open(tk_path, "w") as f:
+                    json.dump({"privacy_placeholder": {"enabled": True}}, f)
+                self.assertEqual(b2s.desired_view(tk_path), "privacy")
+            finally:
+                b2s.STATE = old_state
+
 
 if __name__ == "__main__":
     unittest.main()

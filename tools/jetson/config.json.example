@@ -18,5 +18,7 @@
   "stage_left_x_640": 12,
   "stage_right_x_640": 515,
   "loss_hold_seconds": 6.0,
-  "acquisition_confirm_frames": 4
+  "acquisition_confirm_frames": 4,
+  "stage_resting_preset_id": 16,
+  "privacy_preset_id": 17
 }

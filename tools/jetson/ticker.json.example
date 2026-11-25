@@ -23,6 +23,13 @@
     "crop_osd": true,
     "temporal_smooth": true
   },
+  "privacy_placeholder": {
+    "enabled": false,
+    "style": "fullbleed",
+    "show_standby_badge": true,
+    "badge_label": "STAGE STANDBY",
+    "show_cam2_in_privacy": false
+  },
   "wall_overlay": {
     "enabled": false,
     "lines": [

@@ -78,6 +78,24 @@ def desired():
         return 'off'
 
 
+def desired_view(ticker_path="/home/joseph1/box2-stream/ticker.json"):
+    """Return 'privacy' (Box 2 wall placeholder) or 'stage' (normal Stage Director)."""
+    try:
+        st = json.loads(STATE.read_text())
+        if st.get('view') in ('privacy', 'standby', 'brb'):
+            return 'privacy'
+    except (OSError, ValueError):
+        pass
+    try:
+        if os.path.exists(ticker_path):
+            tk = json.loads(Path(ticker_path).read_text())
+            if tk.get('privacy_mode') is True or tk.get('privacy_placeholder', {}).get('enabled') is True:
+                return 'privacy'
+    except (OSError, ValueError):
+        pass
+    return 'stage'
+
+
 # ----- finding and logging in to the NVR -----
 def wifi_network():
     route = subprocess.run(['ip', '-4', 'route', 'show', 'default'], capture_output=True, text=True).stdout
@@ -136,6 +154,22 @@ def nvr_logout(ip, token):
         nvr_call(ip, f'cmd=Logout&token={token}', [{'cmd': 'Logout', 'action': 0, 'param': {}}], timeout=4)
     except Exception:
         pass
+
+
+def nvr_goto_preset(ip, token, preset_id, channel=0, speed=32):
+    """Recall a saved optical PTZ preset on the Reolink NVR."""
+    if not ip or not token or not preset_id:
+        return False
+    try:
+        res = nvr_call(
+            ip,
+            f'cmd=PtzCtrl&token={token}',
+            [{'cmd': 'PtzCtrl', 'action': 0, 'param': {'channel': int(channel), 'op': 'ToPos', 'id': int(preset_id), 'speed': int(speed)}}],
+            timeout=5,
+        )
+        return res.get('code') == 0
+    except Exception:
+        return False
 
 
 def flv_url(ip, token, cfg):
@@ -314,7 +348,7 @@ class TickerOverlay:
             self.last_countdown_update = now_mono
             self._update_full_str()
 
-    def draw(self, frame_bgr):
+    def draw(self, frame_bgr, standby_mode=False):
         h, w = frame_bgr.shape[:2]
         self.reload_if_needed()
 
@@ -332,7 +366,7 @@ class TickerOverlay:
         title = self.data.get("title", "BOX 2  |  CANTON REFINERY")
         cv2.putText(frame_bgr, title, (140, 33), cv2.FONT_HERSHEY_DUPLEX, 0.6, (220, 220, 220), 1)
 
-        # 4. Imminent reset warning badge (shows when <= 3 minutes / 180s before rollover)
+        # 4. Imminent reset warning badge (<= 180s) OR optional Standby badge in privacy placeholder mode
         rem_sec = self.current_rem_sec
         if rem_sec is not None and rem_sec <= 180:
             if rem_sec <= 60:
@@ -351,6 +385,11 @@ class TickerOverlay:
             cv2.rectangle(frame_bgr, (500, 12), (730, 42), badge_bg, -1)
             cv2.rectangle(frame_bgr, (500, 12), (730, 42), badge_border, 1)
             cv2.putText(frame_bgr, badge_text, (518, 33), cv2.FONT_HERSHEY_DUPLEX, 0.55, text_color, 1)
+        elif standby_mode and self.data.get("privacy_placeholder", {}).get("show_standby_badge", True):
+            standby_label = self.data.get("privacy_placeholder", {}).get("badge_label", "STAGE STANDBY")
+            cv2.rectangle(frame_bgr, (500, 12), (710, 42), (32, 34, 42), -1)
+            cv2.rectangle(frame_bgr, (500, 12), (710, 42), (110, 115, 130), 1)
+            cv2.putText(frame_bgr, standby_label, (520, 33), cv2.FONT_HERSHEY_DUPLEX, 0.52, (205, 210, 220), 1)
 
         # 5. Live moving timestamp (updates each second)
         now_str = datetime.now().strftime("%m/%d/%Y  %I:%M:%S %p")
@@ -763,7 +802,13 @@ class DirectorStream:
         self.target = target
         self.started = time.monotonic()
         self.last_progress = self.started
-        self.stats = {'frame': 0, 'fps': 0.0, 'bitrate': '', 'out_time': '00:00:00', 'mode': 'director'}
+        self.stage_preset_id = int(cfg.get("stage_resting_preset_id", 16))
+        self.privacy_preset_id = int(cfg.get("privacy_preset_id", 17))
+        self.current_view_mode = desired_view()
+        self._last_view_check = 0.0
+        self._ptz_slew_until = 0.0
+        self._held_canvas = None
+        self.stats = {'frame': 0, 'fps': 0.0, 'bitrate': '', 'out_time': '00:00:00', 'mode': 'director', 'view': self.current_view_mode}
         self.errors = []
         self._stop_event = threading.Event()
 
@@ -911,11 +956,77 @@ class DirectorStream:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
 
         self.last_progress = time.monotonic()
+        if self.ip and self.token:
+            init_preset = self.privacy_preset_id if self.current_view_mode == 'privacy' else self.stage_preset_id
+            threading.Thread(target=nvr_goto_preset, args=(self.ip, self.token, init_preset), daemon=True).start()
         threading.Thread(target=self.run_worker, daemon=True).start()
         threading.Thread(target=self.read_progress, daemon=True).start()
         threading.Thread(target=self.read_errors, daemon=True).start()
         if self.ip and self.token:
             threading.Thread(target=self._keepalive_worker, daemon=True).start()
+
+    def _render_privacy_canvas(self, src_frame):
+        """Render the 5x optically zoomed Box 2 wall sign (Preset 17) into full output canvas."""
+        vis_h = max(16, self.out_h - self.top_matte_h)
+        sx = self.src_w / 640.0
+        sy = self.src_h / 360.0
+        p_cfg = self.ticker.data.get("privacy_placeholder", {})
+        style = p_cfg.get("style", "fullbleed")
+
+        out = np.full((self.out_h, self.out_w, 3), (10, 10, 12), dtype=np.uint8)
+        if style == "spotlight":
+            x1, y1, x2, y2 = int(72 * sx), int(38 * sy), int(282 * sx), int(246 * sy)
+            sub = src_frame[max(0, y1):min(self.src_h, y2), max(0, x1):min(self.src_w, x2)].copy()
+            spot_w = min(self.out_w, int(round(vis_h * (210.0 / 208.0))))
+            vis = cv2.resize(sub, (spot_w, vis_h), interpolation=cv2.INTER_LANCZOS4)
+            mask = np.ones((vis_h, spot_w), dtype=np.float32)
+            fx, fy = min(75, spot_w // 4), min(45, vis_h // 4)
+            for i in range(fx):
+                f = 0.5 - 0.5 * np.cos(np.pi * i / max(1, fx))
+                mask[:, i] *= f
+                mask[:, spot_w - 1 - i] *= f
+            for j in range(fy):
+                f = 0.5 - 0.5 * np.cos(np.pi * j / max(1, fy))
+                mask[j, :] *= f
+                mask[vis_h - 1 - j, :] *= f
+            xo = (self.out_w - spot_w) // 2
+            roi_bg = out[self.top_matte_h:self.out_h, xo:xo + spot_w].astype(np.float32)
+            out[self.top_matte_h:self.out_h, xo:xo + spot_w] = (
+                roi_bg * (1.0 - mask[:, :, None]) + vis.astype(np.float32) * mask[:, :, None]
+            ).astype(np.uint8)
+        else:
+            # Default fullbleed undistorted crop on Box 2 wall above jukebox (x=0..356, y=54..224 on 640x360)
+            x1, y1, x2, y2 = 0, int(54 * sy), int(356 * sx), int(224 * sy)
+            sub = src_frame[max(0, y1):min(self.src_h, y2), max(0, x1):min(self.src_w, x2)].copy()
+            sw = sub.shape[1]
+            # Smooth dark vignette on left locker edge and right pipe edge (completely hides x>=320)
+            r_start, r_zero = int(285 * sx), int(320 * sx)
+            l_end = int(50 * sx)
+            x_idx = np.arange(sw, dtype=np.float32)
+            w_mask = np.ones(sw, dtype=np.float32)
+            if l_end > 0:
+                w_mask = np.minimum(w_mask, np.clip(x_idx / float(l_end), 0.15, 1.0))
+            if r_zero > r_start:
+                w_mask = np.minimum(w_mask, np.clip(1.0 - (x_idx - r_start) / float(r_zero - r_start), 0.0, 1.0))
+            bg_px = np.array([10.0, 10.0, 12.0], dtype=np.float32)
+            sub = (sub.astype(np.float32) * w_mask[None, :, None] + bg_px * (1.0 - w_mask[None, :, None])).astype(np.uint8)
+            out[self.top_matte_h:self.out_h, :] = cv2.resize(sub, (self.out_w, vis_h), interpolation=cv2.INTER_LANCZOS4)
+        return out
+
+    def _render_stage_box2_fallback(self, wide_frame):
+        """Instant crop onto Box 2 from wide Stage view used during the 2.6s PTZ motor slew to Preset 17."""
+        vis_h = max(16, self.out_h - self.top_matte_h)
+        sx = self.src_w / 640.0
+        sy = self.src_h / 360.0
+        x1, y1, x2, y2 = int(435 * sx), int(52 * sy), int(548 * sx), int(148 * sy)
+        sub = wide_frame[max(0, y1):min(self.src_h, y2), max(0, x1):min(self.src_w, x2)].copy()
+        out = np.full((self.out_h, self.out_w, 3), (10, 10, 12), dtype=np.uint8)
+        if sub.size > 0:
+            spot_w = min(self.out_w, int(round(vis_h * (sub.shape[1] / max(1.0, float(sub.shape[0]))))))
+            vis = cv2.resize(sub, (spot_w, vis_h), interpolation=cv2.INTER_CUBIC)
+            xo = (self.out_w - spot_w) // 2
+            out[self.top_matte_h:self.out_h, xo:xo + spot_w] = vis
+        return out
 
     def get_token(self):
         with self.token_lock:
@@ -1053,88 +1164,126 @@ class DirectorStream:
                 cur_utc = datetime.now(timezone.utc)
                 self.ensure_session(cur_utc, cur_mono)
 
-                candidate_boxes = []
-                onstage_count = 0
-                if consecutive_read_fails == 0:
-                    # Face detection on native 640x360 (~48ms, 100% detection rate on human faces)
-                    if (self.src_w, self.src_h) == (640, 360):
-                        det_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                        sx = 1.0
-                        sy = 1.0
-                    else:
-                        det_frame = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_LINEAR)
-                        det_gray = cv2.cvtColor(det_frame, cv2.COLOR_BGR2GRAY)
-                        sx = self.src_w / 640.0
-                        sy = self.src_h / 360.0
+                # Poll desired view mode ('stage' vs 'privacy' Box 2 placeholder) every 0.5s without dropping stream
+                if cur_mono - self._last_view_check >= 0.5:
+                    self._last_view_check = cur_mono
+                    target_view = desired_view()
+                    if target_view != self.current_view_mode:
+                        log(f"Stage Director view transition: {self.current_view_mode} -> {target_view}")
+                        if target_view == "privacy":
+                            # Immediately mask room using Box 2 fallback before PTZ motor starts moving
+                            self._held_canvas = self._render_stage_box2_fallback(frame)
+                            self._ptz_slew_until = cur_mono + 2.8
+                            if self.ip:
+                                threading.Thread(
+                                    target=nvr_goto_preset,
+                                    args=(self.ip, self.get_token(), self.privacy_preset_id),
+                                    daemon=True,
+                                ).start()
+                        else:
+                            # Hold clean Box 2 privacy canvas while PTZ slews back to Stage Resting
+                            self._held_canvas = self._render_privacy_canvas(frame)
+                            self._ptz_slew_until = cur_mono + 2.8
+                            self.adapter.framing.reset(monotonic_seconds=cur_mono)
+                            self.adapter.tracker.enable()
+                            if self.ip:
+                                threading.Thread(
+                                    target=nvr_goto_preset,
+                                    args=(self.ip, self.get_token(), self.stage_preset_id),
+                                    daemon=True,
+                                ).start()
+                        self.current_view_mode = target_view
+                        self.stats['view'] = target_view
 
-                    raw_faces = self.face_cascade.detectMultiScale(
-                        det_gray, scaleFactor=1.15, minNeighbors=4, minSize=(22, 22), maxSize=(58, 58)
-                    )
+                if cur_mono < self._ptz_slew_until and self._held_canvas is not None:
+                    rendered = self._held_canvas.copy()
+                elif self.current_view_mode == "privacy":
+                    rendered = self._render_privacy_canvas(frame)
+                    if self.cam2_overlay is not None and self.ticker.data.get("privacy_placeholder", {}).get("show_cam2_in_privacy", False):
+                        self.cam2_overlay.draw(rendered, is_performer_framed=False)
+                else:
+                    candidate_boxes = []
+                    onstage_count = 0
+                    if consecutive_read_fails == 0:
+                        # Face detection on native 640x360 (~48ms, 100% detection rate on human faces)
+                        if (self.src_w, self.src_h) == (640, 360):
+                            det_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                            sx = 1.0
+                            sy = 1.0
+                        else:
+                            det_frame = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_LINEAR)
+                            det_gray = cv2.cvtColor(det_frame, cv2.COLOR_BGR2GRAY)
+                            sx = self.src_w / 640.0
+                            sy = self.src_h / 360.0
 
-                    for (fx, fy, fw, fh) in raw_faces:
-                        bbox = BoundingBox(
-                            x=float(fx * sx),
-                            y=float(fy * sy),
-                            width=float(fw * sx),
-                            height=float(fh * sy),
+                        raw_faces = self.face_cascade.detectMultiScale(
+                            det_gray, scaleFactor=1.15, minNeighbors=4, minSize=(22, 22), maxSize=(58, 58)
                         )
-                        if (
-                            bbox.center_y <= self.floor_cutoff_y
-                            and not self.adapter.tracker._is_excluded(bbox)
-                            and self.stage_polygon.contains_box(bbox)
-                        ):
-                            candidate_boxes.append(bbox)
-                            onstage_count += 1
 
-                    # Let PerformerTracker.update() enforce the multi-frame acquisition_confirm_frames
-                    # persistence gate for single performers; only resolve simultaneous multi-person
-                    # ambiguity once the primary candidate also satisfies persistence.
-                    if self.adapter.tracker.state.value == "ambiguous" and candidate_boxes:
-                        primary = max(candidate_boxes, key=lambda b: b.area)
-                        if self.adapter.tracker._check_acquisition_persistence(primary, cur_mono):
-                            self.adapter.confirm_subject(primary, cur_mono)
+                        for (fx, fy, fw, fh) in raw_faces:
+                            bbox = BoundingBox(
+                                x=float(fx * sx),
+                                y=float(fy * sy),
+                                width=float(fw * sx),
+                                height=float(fh * sy),
+                            )
+                            if (
+                                bbox.center_y <= self.floor_cutoff_y
+                                and not self.adapter.tracker._is_excluded(bbox)
+                                and self.stage_polygon.contains_box(bbox)
+                            ):
+                                candidate_boxes.append(bbox)
+                                onstage_count += 1
 
-                    proposal = self.adapter.process_frame(candidate_boxes, cur_utc, cur_mono)
+                        # Let PerformerTracker.update() enforce the multi-frame acquisition_confirm_frames
+                        # persistence gate for single performers; only resolve simultaneous multi-person
+                        # ambiguity once the primary candidate also satisfies persistence.
+                        if self.adapter.tracker.state.value == "ambiguous" and candidate_boxes:
+                            primary = max(candidate_boxes, key=lambda b: b.area)
+                            if self.adapter.tracker._check_acquisition_persistence(primary, cur_mono):
+                                self.adapter.confirm_subject(primary, cur_mono)
 
-                    # Log tracking state transitions
-                    current_state = (proposal.tracking_state, proposal.camera_action)
-                    if current_state != self._last_logged_state:
-                        log(f"Stage Director state: {proposal.tracking_state}, action: {proposal.camera_action}, candidates: {onstage_count}")
-                        self._last_logged_state = current_state
+                        proposal = self.adapter.process_frame(candidate_boxes, cur_utc, cur_mono)
 
-                if proposal is None:
-                    proposal = self.adapter.process_frame([], cur_utc, cur_mono)
+                        # Log tracking state transitions
+                        current_state = (proposal.tracking_state, proposal.camera_action)
+                        if current_state != self._last_logged_state:
+                            log(f"Stage Director state: {proposal.tracking_state}, action: {proposal.camera_action}, candidates: {onstage_count}")
+                            self._last_logged_state = current_state
 
-                crop = proposal.obs_crop
-                if crop and proposal.camera_action == "track_face":
-                    x1 = max(0, crop["left"])
-                    y1 = max(0, crop["top"])
-                    x2 = min(self.src_w, self.src_w - crop["right"])
-                    y2 = min(self.src_h, self.src_h - crop["bottom"])
-                    if x2 > x1 + 10 and y2 > y1 + 10:
-                        cropped = frame[y1:y2, x1:x2]
-                        rendered = cv2.resize(cropped, (self.out_w, self.out_h), interpolation=cv2.INTER_LINEAR)
+                    if proposal is None:
+                        proposal = self.adapter.process_frame([], cur_utc, cur_mono)
+
+                    crop = proposal.obs_crop
+                    if crop and proposal.camera_action == "track_face":
+                        x1 = max(0, crop["left"])
+                        y1 = max(0, crop["top"])
+                        x2 = min(self.src_w, self.src_w - crop["right"])
+                        y2 = min(self.src_h, self.src_h - crop["bottom"])
+                        if x2 > x1 + 10 and y2 > y1 + 10:
+                            cropped = frame[y1:y2, x1:x2]
+                            rendered = cv2.resize(cropped, (self.out_w, self.out_h), interpolation=cv2.INTER_LINEAR)
+                        else:
+                            rendered = cv2.resize(frame, (self.out_w, self.out_h), interpolation=cv2.INTER_AREA)
                     else:
                         rendered = cv2.resize(frame, (self.out_w, self.out_h), interpolation=cv2.INTER_AREA)
-                else:
-                    rendered = cv2.resize(frame, (self.out_w, self.out_h), interpolation=cv2.INTER_AREA)
 
-                # Subtle painted wall / parking lot camera overlay:
-                # Stays steady on empty wide stage (ignoring unconfirmed 1-frame blips),
-                # and stays smoothly faded to 0 throughout tracking, holding, and zoom-out transitions.
-                zoom_factor = (proposal.framing or {}).get("zoom_factor", 1.0)
-                is_performer_framed = (
-                    proposal.tracking_state in ("tracking", "holding")
-                    or zoom_factor > 1.05
-                )
-                if self.cam2_overlay is not None and self.cam2_overlay.enabled:
-                    self.cam2_overlay.draw(rendered, is_performer_framed=is_performer_framed)
-                else:
-                    self.wall_overlay.draw(rendered, is_performer_framed=is_performer_framed)
+                    # Subtle painted wall / parking lot camera overlay:
+                    # Stays steady on empty wide stage (ignoring unconfirmed 1-frame blips),
+                    # and stays smoothly faded to 0 throughout tracking, holding, and zoom-out transitions.
+                    zoom_factor = (proposal.framing or {}).get("zoom_factor", 1.0)
+                    is_performer_framed = (
+                        proposal.tracking_state in ("tracking", "holding")
+                        or zoom_factor > 1.05
+                    )
+                    if self.cam2_overlay is not None and self.cam2_overlay.enabled:
+                        self.cam2_overlay.draw(rendered, is_performer_framed=is_performer_framed)
+                    else:
+                        self.wall_overlay.draw(rendered, is_performer_framed=is_performer_framed)
 
                 # Draw top broadcast banner with live moving timestamp & scrolling ticker tape
                 if self.top_matte_h > 0:
-                    self.ticker.draw(rendered)
+                    self.ticker.draw(rendered, standby_mode=(self.current_view_mode == "privacy"))
 
                 try:
                     self.proc.stdin.write(rendered.tobytes())
@@ -1306,10 +1455,20 @@ def run():
 def main():
     command = sys.argv[1] if len(sys.argv) > 1 else 'status'
     if command in ('on', 'test', 'off'):
-        write_json(STATE, {'desired': command, 'set': now()})
-        print({'on': 'Going live: the Orin will stream to Twitch within a few seconds.',
+        write_json(STATE, {'desired': command, 'view': 'stage', 'set': now()})
+        print({'on': 'Going live (stage view): the Orin will stream to Twitch within a few seconds.',
                'test': 'Twitch bandwidth test: the Orin streams to Twitch without going live.',
                'off': 'Stream off.'}[command])
+    elif command in ('privacy', 'standby', 'brb'):
+        cur_desired = desired()
+        target_desired = cur_desired if cur_desired in ('on', 'test') else 'on'
+        write_json(STATE, {'desired': target_desired, 'view': 'privacy', 'set': now()})
+        print('Privacy placeholder ON: camera zooming to Box 2 wall sign (Preset 17). Room hidden; Twitch stream stays live.')
+    elif command == 'stage':
+        cur_desired = desired()
+        target_desired = cur_desired if cur_desired in ('on', 'test') else 'on'
+        write_json(STATE, {'desired': target_desired, 'view': 'stage', 'set': now()})
+        print('Stage view ON: camera returning to Stage Resting (Preset 16) and resuming Stage Director.')
     elif command == 'status':
         try:
             print(STATUS.read_text())
