@@ -190,6 +190,29 @@ def load_jokes_data(jokes_path=None):
     return {"seasonal_greeting": "", "jokes": []}
 
 
+def format_now_playing_label(raw_track, audio_source="house_ssd", ad_shield_active=False):
+    """Format clean (badge_tag, display_title) for the attached Now Playing tab beneath the ticker."""
+    src = str(audio_source or "").lower()
+    if ad_shield_active or src == "box2_ads_swap":
+        return "SPONSOR", "YurrMom.Com"
+
+    t = str(raw_track or "").strip()
+    if not t:
+        return "", ""
+    # Strip leading numeric track indices like '01_' or '04 - '
+    t = re.sub(r'^\d{1,3}[\s_.-]+', '', t).strip()
+    if " - " not in t and "_" in t:
+        t = t.replace("_", " ").strip()
+    if len(t) > 52:
+        t = t[:49].rstrip() + "..."
+
+    if src == "dj_spotify":
+        return "SPOTIFY", t
+    if src == "dj_suno":
+        return "SUNO", t
+    return "NOW PLAYING", t
+
+
 def view_policy(now_epoch=None, state_data=None):
     """Return ('privacy' | 'stage' | 'rehearse' | 'auto'). Timed rehearse overrides auto-expire."""
     st = state_data if state_data is not None else read_state()
@@ -1447,6 +1470,11 @@ class TickerOverlay:
         self.scroll_x = 0
         self.live_banner = ""
         self.full_ticker_str = ""
+        self._np_cache_key = None
+        self._np_bgr = None
+        self._np_alpha = None
+        self._np_font_tag = None
+        self._np_font_song = None
         self._update_full_str()
 
     def set_live_banner(self, banner_text):
@@ -1678,6 +1706,129 @@ class TickerOverlay:
         cv2.putText(ticker_roi, self.full_ticker_str, (start_x, 30), font, font_scale, ticker_text_color, font_thick, cv2.LINE_AA)
         if start_x + tw < roi_w:
             cv2.putText(ticker_roi, self.full_ticker_str, (start_x + tw, 30), font, font_scale, ticker_text_color, font_thick, cv2.LINE_AA)
+
+    def _get_np_fonts(self):
+        if self._np_font_tag is not None or not HAS_PIL:
+            return self._np_font_tag, self._np_font_song
+        for fp in (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/Library/Fonts/Arial Bold.ttf",
+        ):
+            if os.path.exists(fp):
+                try:
+                    self._np_font_tag = ImageFont.truetype(fp, 11)
+                    self._np_font_song = ImageFont.truetype(fp, 13)
+                    return self._np_font_tag, self._np_font_song
+                except Exception:
+                    pass
+        self._np_font_tag = ImageFont.load_default()
+        self._np_font_song = ImageFont.load_default()
+        return self._np_font_tag, self._np_font_song
+
+    def _build_now_playing_tab(self, tag_str, song_str, is_tg):
+        tab_h = 30
+        if not HAS_PIL:
+            full_s = f"{tag_str}: {song_str}"
+            (tw, _), _ = cv2.getTextSize(full_s, cv2.FONT_HERSHEY_DUPLEX, 0.45, 1)
+            tab_w = min(560, max(220, tw + 46))
+            bgr = np.full((tab_h, tab_w, 3), (16, 20, 30), dtype=np.uint8)
+            alpha = np.full((tab_h, tab_w, 1), 0.90, dtype=np.float32)
+            bd = (42, 130, 225) if is_tg else (90, 110, 140)
+            cv2.line(bgr, (0, 0), (0, tab_h - 1), bd, 1)
+            cv2.line(bgr, (tab_w - 1, 0), (tab_w - 1, tab_h - 1), bd, 1)
+            cv2.line(bgr, (0, tab_h - 1), (tab_w - 1, tab_h - 1), bd, 1)
+            cv2.putText(bgr, full_s, (34, 20), cv2.FONT_HERSHEY_DUPLEX, 0.44, (230, 240, 250), 1, cv2.LINE_AA)
+            return bgr, alpha
+
+        f_tag, f_song = self._get_np_fonts()
+        dummy = Image.new("RGBA", (10, 10))
+        d0 = ImageDraw.Draw(dummy)
+        tb = d0.textbbox((0, 0), tag_str, font=f_tag)
+        sb = d0.textbbox((0, 0), song_str, font=f_song)
+        tag_w = tb[2] - tb[0]
+        song_w = sb[2] - sb[0]
+        # Layout: [12px pad] [18px eq bars] [8px gap] [tag pill] [10px gap] [song title] [14px pad]
+        tab_w = min(620, max(230, 12 + 18 + 8 + (tag_w + 14) + 10 + song_w + 16))
+
+        img = Image.new("RGBA", (tab_w, tab_h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        bg_rgba = (24, 15, 10, 232) if is_tg else (18, 20, 28, 230)
+        border_rgba = (225, 128, 42, 235) if is_tg else (90, 130, 175, 220)
+        # Docked tab shape: square top corners flush against y=top_h-1, rounded bottom corners
+        draw.rounded_rectangle([(0, -8), (tab_w - 1, tab_h - 1)], radius=9, fill=bg_rgba, outline=border_rgba, width=1)
+
+        pill_x1 = 38
+        pill_x2 = pill_x1 + tag_w + 14
+        if tag_str == "SPOTIFY":
+            pill_fill = (24, 135, 68, 235)
+            pill_txt = (240, 255, 245, 255)
+        elif is_tg:
+            pill_fill = (78, 36, 14, 245)
+            pill_txt = (255, 210, 108, 255)
+        else:
+            pill_fill = (32, 46, 68, 240)
+            pill_txt = (120, 225, 255, 255)
+
+        draw.rounded_rectangle([(pill_x1, 6), (pill_x2, tab_h - 6)], radius=5, fill=pill_fill)
+        draw.text((pill_x1 + 7, 8), tag_str, font=f_tag, fill=pill_txt)
+
+        song_x = pill_x2 + 10
+        draw.text((song_x + 1, 8), song_str, font=f_song, fill=(0, 0, 0, 180))
+        draw.text((song_x, 7), song_str, font=f_song, fill=(255, 246, 230, 255))
+
+        arr = np.array(img)
+        bgr = arr[:, :, [2, 1, 0]].copy()
+        alpha = (arr[:, :, 3:4].astype(np.float32)) / 255.0
+        return bgr, alpha
+
+    def draw_now_playing_tab(self, frame_bgr, music_stats):
+        """Draw compact docked 'Now Playing' tab right beneath the ticker bar when music is playing."""
+        if not music_stats or not music_stats.get("music_playing"):
+            return
+        np_cfg = self.data.get("now_playing_tab", {})
+        if isinstance(np_cfg, dict) and not np_cfg.get("enabled", True):
+            return
+
+        tag_str, song_str = format_now_playing_label(
+            raw_track=music_stats.get("music_track", ""),
+            audio_source=music_stats.get("audio_source", "house_ssd"),
+            ad_shield_active=bool(music_stats.get("ad_shield_active", False)),
+        )
+        if not song_str:
+            return
+
+        is_tg = str(self.data.get("seasonal_theme", "thanksgiving")).lower() == "thanksgiving"
+        ckey = (tag_str, song_str, is_tg)
+        if ckey != self._np_cache_key or self._np_bgr is None:
+            self._np_bgr, self._np_alpha = self._build_now_playing_tab(tag_str, song_str, is_tg)
+            self._np_cache_key = ckey
+
+        fh, fw = frame_bgr.shape[:2]
+        tab_h, tab_w = self._np_bgr.shape[:2]
+        align = str((np_cfg or {}).get("align", "right")).lower()
+        x1 = 20 if align == "left" else max(20, (fw - 20) - tab_w)
+        y1 = self.top_h - 1
+        x2, y2 = min(fw, x1 + tab_w), min(fh, y1 + tab_h)
+        if y2 - y1 != tab_h or x2 - x1 != tab_w:
+            return
+
+        roi = frame_bgr[y1:y2, x1:x2].astype(np.float32)
+        frame_bgr[y1:y2, x1:x2] = (
+            roi * (1.0 - self._np_alpha) + self._np_bgr.astype(np.float32) * self._np_alpha
+        ).astype(np.uint8)
+
+        # Animated 4-bar mini audio equalizer on left side of tab
+        t = time.monotonic()
+        bar_color = (95, 215, 50) if tag_str == "SPOTIFY" else ((65, 195, 255) if is_tg else (0, 225, 255))
+        for bi, freq in enumerate((5.2, 7.1, 4.3, 6.4)):
+            bh = int(4 + 11 * (0.5 + 0.5 * math.sin(t * freq + bi * 1.3)))
+            bx = x1 + 13 + bi * 5
+            by2 = y1 + tab_h - 7
+            by1 = by2 - bh
+            cv2.rectangle(frame_bgr, (bx, by1), (bx + 2, by2), bar_color, -1)
 
 
 class ShowtimeCountdownOverlay:
@@ -2842,8 +2993,11 @@ class DirectorStream:
                     self.countdown_overlay.draw(rendered, standby_mode=True, top_matte_h=self.top_matte_h)
 
                 if self.top_matte_h > 0:
-                    self.ticker.set_live_banner(self.audio_mixer.stats.get("now_playing_banner", ""))
+                    # Only push sponsor break alerts into scrolling ticker text; song titles display in the dedicated tab below!
+                    banner_override = self.audio_mixer.stats.get("now_playing_banner", "") if self.audio_mixer.stats.get("ad_shield_active") else ""
+                    self.ticker.set_live_banner(banner_override)
                     self.ticker.draw(rendered, standby_mode=(self.current_view_mode == "privacy"))
+                    self.ticker.draw_now_playing_tab(rendered, self.audio_mixer.stats)
 
                 self.stats.update(self.audio_mixer.stats)
 

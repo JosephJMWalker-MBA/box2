@@ -439,6 +439,20 @@ class StreamResilienceTests(unittest.TestCase):
             self.assertLessEqual(abs(cd_mid_y - pip_mid_y), 1.0)
             self.assertEqual(cd.x, 1280 - 382 - 26)
 
+            # Verify Now Playing tab label cleanup for YurrMom.Com SSD & Spotify tracks
+            self.assertEqual(
+                b2s.format_now_playing_label("01_YurrMom.Com - I LIKE ROCKS", "house_ssd", False),
+                ("NOW PLAYING", "YurrMom.Com - I LIKE ROCKS"),
+            )
+            self.assertEqual(
+                b2s.format_now_playing_label("YurrMom.Com - Dish Duty Shuffle", "dj_spotify", False),
+                ("SPOTIFY", "YurrMom.Com - Dish Duty Shuffle"),
+            )
+            self.assertEqual(
+                b2s.format_now_playing_label("01_yurrmom_sponsor_bumper_20s", "box2_ads_swap", True),
+                ("SPONSOR", "YurrMom.Com"),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
