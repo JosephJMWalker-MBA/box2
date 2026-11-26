@@ -325,6 +325,84 @@ class StreamResilienceTests(unittest.TestCase):
             self.assertEqual(b2s.parse_duration_seconds("90s"), 90.0)
             self.assertEqual(b2s.parse_duration_seconds("15"), 900.0)
 
+    def test_spotify_ad_interception_and_dmca_artist_shield(self):
+        """Verifies Spotify Free ads & non-YurrMom artists trigger box2-ads swap while YurrMom & Suno air cleanly."""
+        b2s = _load_b2s()
+        radio = b2s.box2_radio
+
+        # 1. Verified YurrMom.Com song on Spotify -> airs live + populates Spotify banner
+        d_ok = radio.classify_mpris_track("spotify", "Playing", "Canton Nights", "YurrMom.Com")
+        self.assertEqual(d_ok.action, "air_bus")
+        self.assertIn("NOW PLAYING ON SPOTIFY: YurrMom.Com - Canton Nights", d_ok.ticker_banner)
+
+        # 2. Explicit Spotify Free ad ("Advertisement" or spotify:ad: URI) -> swaps to box2-ads!
+        d_ad1 = radio.classify_mpris_track("spotify", "Playing", "Advertisement", "")
+        self.assertEqual(d_ad1.action, "ad_break_swap")
+        self.assertIn("SPONSOR BREAK", d_ad1.ticker_banner)
+
+        d_ad2 = radio.classify_mpris_track("spotify", "Playing", "Upgrade to Premium", "Spotify", url="spotify:ad:12345")
+        self.assertEqual(d_ad2.action, "ad_break_swap")
+
+        # 3. Random third-party recommended artist mixed in by Spotify Free -> DMCA shield swaps to box2-ads!
+        d_dmca = radio.classify_mpris_track("spotify", "Playing", "Major Label Hit", "Random Major Artist")
+        self.assertEqual(d_dmca.action, "dmca_shield_swap")
+        self.assertIn("SPONSOR BREAK", d_dmca.ticker_banner)
+
+        # 4. Suno Discover track -> airs live + populates Suno Discover banner
+        d_suno = radio.classify_mpris_track("suno", "Playing", "Neon Jukebox", "@groovebot")
+        self.assertEqual(d_suno.action, "air_bus")
+        self.assertIn("SUNO DISCOVER RADIO: Neon Jukebox", d_suno.ticker_banner)
+
+    def test_radio_block_rotation_suno_to_spotify_and_never_interrupts_ad(self):
+        """Verifies RadioRotationScheduler alternates Suno <-> YurrMom Spotify blocks without pausing Spotify mid-ad."""
+        b2s = _load_b2s()
+        radio = b2s.box2_radio
+        sched = radio.RadioRotationScheduler(suno_tracks_per_block=2, spotify_tracks_per_block=2)
+
+        def make_state(suno_status, suno_title, spot_status, spot_title, spot_artist):
+            players = {
+                "suno": radio.PlayerSnapshot("bus.suno", "suno", suno_status, title=suno_title, artist="@ai"),
+                "spotify": radio.PlayerSnapshot("bus.spot", "spotify", spot_status, title=spot_title, artist=spot_artist),
+            }
+            decs = {
+                r: radio.classify_mpris_track(r, p.playback_status, p.title, p.artist)
+                for r, p in players.items()
+            }
+            return players, decs
+
+        # Start on Suno song 1 -> pauses Spotify if playing, plays Suno
+        p, d = make_state("Playing", "Suno Song 1", "Playing", "Track A", "YurrMom.Com")
+        target, cmds = sched.step("rotate", p, d, now_mono=10.0)
+        self.assertEqual(target, "suno")
+        self.assertIn(("spotify", "Pause"), cmds)
+
+        # Suno transitions to Song 2 -> Song 3 (2 transitions completed == quota 2) -> switches to Spotify!
+        p, d = make_state("Playing", "Suno Song 2", "Paused", "Track A", "YurrMom.Com")
+        sched.step("rotate", p, d, now_mono=120.0)
+        p, d = make_state("Playing", "Suno Song 3", "Paused", "Track A", "YurrMom.Com")
+        target, cmds = sched.step("rotate", p, d, now_mono=240.0)
+        self.assertEqual(target, "spotify")
+        self.assertIn(("suno", "Pause"), cmds)
+        self.assertIn(("spotify", "Play"), cmds)
+
+        # Spotify plays 2 YurrMom songs, then enters an Advertisement right at block boundary:
+        # Scheduler MUST NOT pause Spotify mid-ad; waits until ad finishes!
+        p, d = make_state("Paused", "Suno Song 3", "Playing", "YM Song 1", "YurrMom.Com")
+        sched.step("rotate", p, d, now_mono=250.0)
+        p, d = make_state("Paused", "Suno Song 3", "Playing", "YM Song 2", "YurrMom.Com")
+        sched.step("rotate", p, d, now_mono=380.0)
+        p, d = make_state("Paused", "Suno Song 3", "Playing", "Advertisement", "")
+        target_during_ad, cmds_ad = sched.step("rotate", p, d, now_mono=1200.0)
+        self.assertEqual(target_during_ad, "spotify")
+        self.assertNotIn(("spotify", "Pause"), cmds_ad)
+
+        # Once Spotify ad ends and next song starts -> cleanly rotates back to Suno!
+        p, d = make_state("Paused", "Suno Song 3", "Playing", "YM Song 3", "YurrMom.Com")
+        target_after_ad, cmds_after = sched.step("rotate", p, d, now_mono=1230.0)
+        self.assertEqual(target_after_ad, "suno")
+        self.assertIn(("spotify", "Pause"), cmds_after)
+        self.assertIn(("suno", "Play"), cmds_after)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,7 @@ Core commands:
   box2-stream auto | done               resume 9PM-2AM stage / 2AM-9PM privacy schedule
   box2-stream stage | privacy           manual view lock without dropping stream
   box2-stream music [auto|on|off|next|bed|walkup|vol <0..1>]   live music & mix control
+  box2-stream dj [launch|status|rotate|suno|spotify|house|skip-ad|test-ad]  Suno + Spotify + Ad-Swap control
   box2-stream mark-set                  mark start of a comedy set right now
   box2-stream clip [dur|--last-set] [label]   save lossless .mp4 clip without dropping stream
   box2-stream clips                     list recent detected sets and saved .mp4 clips
@@ -58,7 +59,16 @@ FFPROBE = '/usr/bin/ffprobe'
 DEFAULT_SSD_ROOT = Path('/mnt/ssd')
 DEFAULT_CLIP_BASE = (DEFAULT_SSD_ROOT / 'box2-clips') if DEFAULT_SSD_ROOT.exists() else (HOME / 'clips')
 DEFAULT_MUSIC_DIR = (DEFAULT_SSD_ROOT / 'media' / 'box2-music') if DEFAULT_SSD_ROOT.exists() else (HOME / 'music')
+DEFAULT_ADS_DIR = (DEFAULT_SSD_ROOT / 'media' / 'box2-ads') if DEFAULT_SSD_ROOT.exists() else (HOME / 'ads')
 AUDIO_EXTS = ('.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.mp4')
+
+if str(HOME) not in sys.path:
+    sys.path.insert(0, str(HOME))
+
+try:
+    import box2_radio
+except ImportError:
+    from tools.jetson import box2_radio
 
 # Stage Director integration
 STAGE_DIR = Path("/home/joseph1/stage-director")
@@ -451,6 +461,8 @@ class BroadcastAudioMixer:
 
         self.music_dir = Path(self.cfg.get("music_dir", str(DEFAULT_MUSIC_DIR)))
         self.music_dir.mkdir(parents=True, exist_ok=True)
+        self.ads_dir = Path(self.cfg.get("ads_dir", str(DEFAULT_ADS_DIR)))
+        self.ads_dir.mkdir(parents=True, exist_ok=True)
 
         self.envelope = AutoDuckEnvelope(
             idle_volume=float(self.cfg.get("music_idle_volume", 0.34)),
@@ -467,34 +479,62 @@ class BroadcastAudioMixer:
         self._stop_event = threading.Event()
         self._mic_queue = collections.deque(maxlen=5)   # max 250ms buffer for tight lip-sync
         self._music_queue = collections.deque(maxlen=16)
+        self._dj_bus_queue = collections.deque(maxlen=6)
+        self._ads_queue = collections.deque(maxlen=16)
         self._mic_lock = threading.Lock()
         self._music_lock = threading.Lock()
+        self._dj_bus_lock = threading.Lock()
+        self._ads_lock = threading.Lock()
         self._mic_proc = None
         self._music_proc = None
+        self._dj_bus_proc = None
+        self._ads_proc = None
 
         self._music_mode = "auto"  # "auto" (on during scheduled/showtime stage), "on", "off"
+        self._dj_mode = str(self.cfg.get("dj_mode", "rotate"))  # "rotate", "suno", "spotify", "house"
+        self._suno_block_tracks = int(self.cfg.get("suno_tracks_per_block", 3))
+        self._spotify_block_tracks = int(self.cfg.get("spotify_tracks_per_block", 3))
+        self._test_ad_until_epoch = 0.0
         self._mute_mic_in_privacy = bool(self.cfg.get("mute_mic_in_privacy", False))
         self._skip_seq = 0
+        self._ad_skip_seq = 0
         self._last_cfg_poll = 0.0
+        self._last_mpris_poll = 0.0
         self._current_track = ""
+        self._current_ad_track = ""
         self._music_desired_now = False
+        self._ad_swap_desired_now = False
+        self._dj_bus_last_audible_mono = -1e9
+        self._radio_decision = box2_radio.TrackDecision(action="idle", reason="init")
+        self._radio_ctrl = box2_radio.MprisRadioController(
+            allowed_spotify_artists=self.cfg.get("allowed_spotify_artists", box2_radio.DEFAULT_ALLOWED_SPOTIFY_ARTISTS)
+        )
+        box2_radio.ensure_pipewire_dj_bus()
 
         self.stats = {
             "audio_mixer": "active",
             "mic_dbfs": -60.0,
             "voice_ducking": False,
             "music_mode": "auto",
+            "dj_mode": self._dj_mode,
+            "audio_source": "house_ssd",
+            "ad_shield_active": False,
             "music_playing": False,
             "music_track": "",
+            "now_playing_banner": "",
             "music_gain": 0.0,
             "music_onstage_mode": self.envelope.onstage_mode,
         }
 
         self._poll_live_controls(force=True)
         self._mic_thread = threading.Thread(target=self._mic_reader_worker, daemon=True)
+        self._dj_bus_thread = threading.Thread(target=self._dj_bus_reader_worker, daemon=True)
+        self._ads_thread = threading.Thread(target=self._ads_reader_worker, daemon=True)
         self._music_thread = threading.Thread(target=self._music_reader_worker, daemon=True)
         self._mix_thread = threading.Thread(target=self._mixer_loop, daemon=True)
         self._mic_thread.start()
+        self._dj_bus_thread.start()
+        self._ads_thread.start()
         self._music_thread.start()
         self._mix_thread.start()
 
@@ -541,6 +581,21 @@ class BroadcastAudioMixer:
                 self._skip_seq = new_skip
                 self._terminate_proc(self._music_proc)
 
+        dj_cfg = st.get("dj", {})
+        if isinstance(dj_cfg, dict):
+            djm = str(dj_cfg.get("mode", self._dj_mode)).lower()
+            if djm in ("rotate", "suno", "spotify", "house"):
+                self._dj_mode = djm
+            if "suno_tracks" in dj_cfg:
+                self._suno_block_tracks = max(1, int(dj_cfg["suno_tracks"]))
+            if "spotify_tracks" in dj_cfg:
+                self._spotify_block_tracks = max(1, int(dj_cfg["spotify_tracks"]))
+            self._test_ad_until_epoch = float(dj_cfg.get("test_ad_until_epoch", 0.0) or 0.0)
+            new_ad_skip = int(dj_cfg.get("ad_skip_seq", 0))
+            if new_ad_skip != self._ad_skip_seq:
+                self._ad_skip_seq = new_ad_skip
+                self._terminate_proc(self._ads_proc)
+
         cur_view = self.view_getter()
         cur_pol = self.policy_getter()
         if self._music_mode == "on":
@@ -550,6 +605,25 @@ class BroadcastAudioMixer:
         else:
             # "auto": play warm-up/show music during active stage hours/showtime, stay quiet in privacy & rehearsal
             self._music_desired_now = (cur_view == "stage" and cur_pol != "rehearse")
+
+        if force or (now_mono - self._last_mpris_poll >= 1.0):
+            self._last_mpris_poll = now_mono
+            try:
+                dec, _ = self._radio_ctrl.poll_and_step(
+                    music_desired_now=self._music_desired_now,
+                    dj_mode=self._dj_mode,
+                    suno_tracks=self._suno_block_tracks,
+                    spotify_tracks=self._spotify_block_tracks,
+                )
+                self._radio_decision = dec
+            except Exception:
+                self._radio_decision = box2_radio.TrackDecision(action="idle", reason="mpris_err")
+
+        test_ad_now = time.time() < self._test_ad_until_epoch
+        self._ad_swap_desired_now = bool(
+            self._music_desired_now
+            and (test_ad_now or self._radio_decision.action in ("ad_break_swap", "dmca_shield_swap"))
+        )
 
     @staticmethod
     def _terminate_proc(proc):
@@ -609,14 +683,105 @@ class BroadcastAudioMixer:
             if not self._stop_event.is_set():
                 time.sleep(1.0)
 
-    def _list_tracks(self):
-        if not self.music_dir.exists():
+    def _list_tracks(self, folder=None):
+        target_dir = Path(folder) if folder is not None else self.music_dir
+        if not target_dir.exists():
             return []
         tracks = [
-            p for p in sorted(self.music_dir.iterdir())
+            p for p in sorted(target_dir.iterdir())
             if p.is_file() and p.suffix.lower() in AUDIO_EXTS and not p.name.startswith(".")
         ]
         return tracks
+
+    def _dj_bus_reader_worker(self):
+        """Capture stereo 48kHz PCM from PipeWire virtual sink `box2_dj_bus.monitor`."""
+        while not self._stop_event.is_set():
+            if not self._music_desired_now or self._dj_mode == "house":
+                with self._dj_bus_lock:
+                    self._dj_bus_queue.clear()
+                time.sleep(0.4)
+                continue
+
+            box2_radio.ensure_pipewire_dj_bus()
+            env = box2_radio.discover_desktop_env()
+            cmd = [
+                FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error",
+                "-f", "pulse", "-i", box2_radio.DJ_BUS_MONITOR,
+                "-ac", "2", "-ar", str(self.SAMPLE_RATE), "-f", "s16le", "pipe:1",
+            ]
+            proc = None
+            try:
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+                self._dj_bus_proc = proc
+                while not self._stop_event.is_set() and self._music_desired_now and self._dj_mode != "house":
+                    buf = proc.stdout.read(self.CHUNK_BYTES)
+                    if not buf or len(buf) < self.CHUNK_BYTES:
+                        break
+                    if np is not None:
+                        s_f32 = np.frombuffer(buf, dtype=np.int16).astype(np.float32) / 32768.0
+                        if self.envelope.compute_rms_dbfs(s_f32) > -62.0:
+                            self._dj_bus_last_audible_mono = time.monotonic()
+                    with self._dj_bus_lock:
+                        self._dj_bus_queue.append(buf)
+            except Exception:
+                pass
+            finally:
+                self._terminate_proc(proc)
+                self._dj_bus_proc = None
+            if not self._stop_event.is_set():
+                time.sleep(1.5)
+
+    def _ads_reader_worker(self):
+        """On-demand decoder for custom sponsor & house promos in `/mnt/ssd/media/box2-ads/`."""
+        ad_idx = 0
+        while not self._stop_event.is_set():
+            if not self._ad_swap_desired_now:
+                self._current_ad_track = ""
+                with self._ads_lock:
+                    self._ads_queue.clear()
+                time.sleep(0.15)
+                continue
+
+            ads = self._list_tracks(self.ads_dir)
+            if not ads:
+                self._current_ad_track = ""
+                time.sleep(0.5)
+                continue
+
+            ad_path = ads[ad_idx % len(ads)]
+            ad_idx = (ad_idx + 1) % max(1, len(ads))
+            self._current_ad_track = ad_path.stem
+            local_skip = self._ad_skip_seq
+
+            cmd = [
+                FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error",
+                "-i", str(ad_path),
+                "-vn",
+                "-af", "dynaudnorm=f=200:g=11:p=0.88",
+                "-ac", "2", "-ar", str(self.SAMPLE_RATE), "-f", "s16le", "pipe:1",
+            ]
+            proc = None
+            try:
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                self._ads_proc = proc
+                while not self._stop_event.is_set() and self._ad_swap_desired_now and local_skip == self._ad_skip_seq:
+                    with self._ads_lock:
+                        q_len = len(self._ads_queue)
+                    if q_len >= 12:
+                        time.sleep(0.03)
+                        continue
+                    buf = proc.stdout.read(self.CHUNK_BYTES)
+                    if not buf:
+                        break
+                    if len(buf) < self.CHUNK_BYTES:
+                        buf = buf + b"\x00" * (self.CHUNK_BYTES - len(buf))
+                    with self._ads_lock:
+                        self._ads_queue.append(buf)
+            except Exception as exc:
+                log(f"Audio mixer ads reader warning: {exc}")
+            finally:
+                self._terminate_proc(proc)
+                self._ads_proc = None
 
     def _music_reader_worker(self):
         track_idx = 0
@@ -708,19 +873,57 @@ class BroadcastAudioMixer:
                     mic_dbfs = -90.0
 
                 is_onstage = bool(self.onstage_getter()) if cur_view == "stage" else False
-                has_tracks = bool(self._current_track)
+                dj_bus_hot = (now_mono - self._dj_bus_last_audible_mono) < 3.0
+                dec = self._radio_decision
+                ad_swap_active = self._ad_swap_desired_now
+                dj_air_active = (
+                    not ad_swap_active
+                    and self._dj_mode != "house"
+                    and dec.action == "air_bus"
+                    and dj_bus_hot
+                )
+
+                has_program_audio = bool(ad_swap_active or dj_air_active or self._current_track)
                 music_gain, voice_active = self.envelope.step(
                     mic_rms_dbfs=mic_dbfs,
                     is_performer_onstage=is_onstage,
-                    music_enabled=(self._music_desired_now and has_tracks),
+                    music_enabled=(self._music_desired_now and has_program_audio),
                     now_mono=now_mono,
                     dt=self.CHUNK_SEC,
                 )
 
                 music_raw = None
-                if music_gain > 0.0005:
-                    with self._music_lock:
-                        music_raw = self._music_queue.popleft() if self._music_queue else None
+                active_source = "off"
+                active_track_label = ""
+                banner_str = ""
+
+                # Always drain _dj_bus_queue during ad swaps so Spotify/browser plays silently without stale lag
+                if ad_swap_active:
+                    with self._dj_bus_lock:
+                        if self._dj_bus_queue:
+                            self._dj_bus_queue.popleft()
+                    if music_gain > 0.0005:
+                        with self._ads_lock:
+                            music_raw = self._ads_queue.popleft() if self._ads_queue else None
+                        if music_raw is None:
+                            with self._music_lock:
+                                music_raw = self._music_queue.popleft() if self._music_queue else None
+                    active_source = "box2_ads_swap"
+                    active_track_label = self._current_ad_track or self._current_track
+                    banner_str = dec.ticker_banner or "SPONSOR BREAK: YURRMOM.COM — BOOK STAGE TIME AT HTTPS://BOX2.YURRMOM.COM"
+                elif dj_air_active:
+                    if music_gain > 0.0005:
+                        with self._dj_bus_lock:
+                            music_raw = self._dj_bus_queue.popleft() if self._dj_bus_queue else None
+                    active_source = f"dj_{dec.source_role or 'bus'}"
+                    active_track_label = f"{dec.artist} - {dec.title}".strip(" -") if (dec.artist or dec.title) else dec.source_role
+                    banner_str = dec.ticker_banner
+                elif self._music_desired_now:
+                    if music_gain > 0.0005:
+                        with self._music_lock:
+                            music_raw = self._music_queue.popleft() if self._music_queue else None
+                    active_source = "house_ssd"
+                    active_track_label = self._current_track
 
                 if music_raw is not None and np is not None:
                     music_f32 = np.frombuffer(music_raw, dtype=np.int16).reshape(-1, 2).astype(np.float32) / 32768.0
@@ -737,8 +940,12 @@ class BroadcastAudioMixer:
                     mic_dbfs=round(mic_dbfs, 1),
                     voice_ducking=bool(voice_active),
                     music_mode=self._music_mode,
+                    dj_mode=self._dj_mode,
+                    audio_source=active_source if self._music_desired_now else "off",
+                    ad_shield_active=bool(ad_swap_active),
                     music_playing=bool(music_gain > 0.005 and music_raw is not None),
-                    music_track=self._current_track if self._music_desired_now else "",
+                    music_track=active_track_label if self._music_desired_now else "",
+                    now_playing_banner=banner_str if self._music_desired_now else "",
                     music_gain=round(music_gain, 3),
                     music_onstage_mode=self.envelope.onstage_mode,
                 )
@@ -756,6 +963,8 @@ class BroadcastAudioMixer:
     def stop(self):
         self._stop_event.set()
         self._terminate_proc(self._mic_proc)
+        self._terminate_proc(self._dj_bus_proc)
+        self._terminate_proc(self._ads_proc)
         self._terminate_proc(self._music_proc)
         try:
             os.close(self.write_fd)
@@ -1194,8 +1403,15 @@ class TickerOverlay:
             "scroll_speed": 4,
         }
         self.scroll_x = 0
+        self.live_banner = ""
         self.full_ticker_str = ""
         self._update_full_str()
+
+    def set_live_banner(self, banner_text):
+        b = str(banner_text or "").strip()
+        if b != self.live_banner:
+            self.live_banner = b
+            self._update_full_str()
 
     def set_refresh_hours(self, refresh_hours):
         rh = int(refresh_hours)
@@ -1208,6 +1424,8 @@ class TickerOverlay:
         if self.refresh_hours <= 0 and test_rem_sec is None:
             # Strip static 3-hour VOD drop notices automatically when running in uninterrupted marathon mode
             raw_msgs = [m for m in raw_msgs if "3-hour vod" not in m.lower()]
+        if self.live_banner:
+            raw_msgs = [self.live_banner] + raw_msgs
         if not raw_msgs:
             raw_msgs = ["BOX 2 LIVE"]
 
@@ -2214,6 +2432,7 @@ class DirectorStream:
                         self.wall_overlay.draw(rendered, is_performer_framed=is_performer_framed)
 
                 if self.top_matte_h > 0:
+                    self.ticker.set_live_banner(self.audio_mixer.stats.get("now_playing_banner", ""))
                     self.ticker.draw(rendered, standby_mode=(self.current_view_mode == "privacy"))
 
                 self.stats.update(self.audio_mixer.stats)
@@ -2420,10 +2639,74 @@ def _handle_music_cli(args):
         print(f"Idle music volume set to {vol:.2f} (auto-ducks when speaking/onstage).")
     else:
         tracks = sorted([p.name for p in DEFAULT_MUSIC_DIR.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXTS]) if DEFAULT_MUSIC_DIR.exists() else []
+        ads = sorted([p.name for p in DEFAULT_ADS_DIR.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXTS]) if DEFAULT_ADS_DIR.exists() else []
         print(json.dumps({
             "music_state": m_cfg,
+            "dj_state": st.get("dj", {}),
             "music_dir": str(DEFAULT_MUSIC_DIR),
             "tracks_available": tracks,
+            "ads_dir": str(DEFAULT_ADS_DIR),
+            "ads_available": ads,
+        }, indent=2))
+
+
+def _handle_dj_cli(args):
+    st = read_state()
+    dj_cfg = dict(st.get('dj', {})) if isinstance(st.get('dj'), dict) else {}
+    sub = args[0].lower() if args else 'status'
+
+    if sub in ('launch', 'open', 'browsers'):
+        target = args[1].lower() if len(args) >= 2 else 'both'
+        launched = box2_radio.launch_dj_browsers(target=target)
+        print(json.dumps({
+            "pipewire_sink": box2_radio.DJ_BUS_SINK,
+            "browsers": launched,
+            "note": "Sign into Suno & Spotify Free once on the Jetson desktop and hit Play; BOX 2 auto-rotates & swaps ads with /mnt/ssd/media/box2-ads/.",
+        }, indent=2))
+    elif sub == 'rotate':
+        if len(args) >= 2:
+            dj_cfg['suno_tracks'] = max(1, int(args[1]))
+        if len(args) >= 3:
+            dj_cfg['spotify_tracks'] = max(1, int(args[2]))
+        dj_cfg['mode'] = 'rotate'
+        update_state(dj=dj_cfg)
+        sn = dj_cfg.get('suno_tracks', 3)
+        sp = dj_cfg.get('spotify_tracks', 3)
+        print(f"DJ Rotation ON: Alternating {sn} Suno Discover songs -> {sp} YurrMom.Com Spotify songs (Spotify ads auto-swapped with {DEFAULT_ADS_DIR}).")
+    elif sub in ('suno', 'spotify', 'house'):
+        dj_cfg['mode'] = sub
+        update_state(dj=dj_cfg)
+        print(f"DJ source pinned to '{sub}'.")
+    elif sub in ('test-ad', 'ad-test'):
+        secs = float(args[1]) if len(args) >= 2 else 15.0
+        dj_cfg['test_ad_until_epoch'] = round(time.time() + max(3.0, secs), 2)
+        update_state(dj=dj_cfg)
+        print(f"Simulating {int(secs)}s ad-break takeover: playing {DEFAULT_ADS_DIR} over Twitch stream while muting DJ bus!")
+    elif sub == 'skip-ad':
+        dj_cfg['ad_skip_seq'] = int(dj_cfg.get('ad_skip_seq', 0)) + 1
+        update_state(dj=dj_cfg)
+        print("Skipped to next promo spot in box2-ads.")
+    else:
+        ctrl = box2_radio.MprisRadioController()
+        players = ctrl.list_players()
+        ads = sorted([p.name for p in DEFAULT_ADS_DIR.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXTS]) if DEFAULT_ADS_DIR.exists() else []
+        print(json.dumps({
+            "dj_config": dj_cfg,
+            "pipewire_bus_ready": box2_radio.ensure_pipewire_dj_bus(),
+            "spotify_artist_url": box2_radio.SPOTIFY_ARTIST_URL,
+            "suno_discover_url": box2_radio.SUNO_DISCOVER_URL,
+            "detected_mpris_players": {
+                role: {
+                    "bus_name": p.bus_name,
+                    "status": p.playback_status,
+                    "title": p.title,
+                    "artist": p.artist,
+                    "pid": p.pid,
+                }
+                for role, p in players.items()
+            },
+            "ads_dir": str(DEFAULT_ADS_DIR),
+            "ads_available": ads,
         }, indent=2))
 
 
@@ -2491,6 +2774,8 @@ def main():
         print('VOD mode ON: Stream will briefly refresh every 3 hours at the top of the hour for Twitch VOD archiving.')
     elif command == 'music':
         _handle_music_cli(sys.argv[2:])
+    elif command == 'dj':
+        _handle_dj_cli(sys.argv[2:])
     elif command == 'mark-set':
         update_state(manual_set_start_epoch=time.time())
         print(f'Set start marker recorded at {now()}. Run "box2-stream clip [label]" right after your set!')
