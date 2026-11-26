@@ -1,22 +1,35 @@
 #!/usr/bin/env python3
-"""BOX2 stream box: NVR stage camera and stage mic → Twitch, unattended, on the Orin.
+"""BOX2 stream box: NVR stage camera, stage mic + auto-ducking show mixer → Twitch + SSD clip buffer.
 
 Supports two streaming modes:
 1. "director" (default): Intelligent Stage Director AI framing, close-up tracking,
-   floor/pet rejection, and periodic establishing room views at 720p.
+   floor/pet rejection, Box 2 privacy standby, auto-ducking show audio mixer,
+   uninterrupted marathon streaming, and instant lossless SSD set clipping at 720p.
 2. "passthrough": Original untouched raw camera feed.
 
-  box2-stream on | test | off   set the desired state (kept across reboots)
-  box2-stream status            show what is happening
-  box2-stream run               the service loop (systemd runs this)
+Core commands:
+  box2-stream on | test | off           set desired stream state (kept across reboots)
+  box2-stream status                    show live stream, view, audio mix & clip status
+  box2-stream marathon | vod-mode       longest uninterrupted stream vs 3-hour VOD drops
+  box2-stream showtime                  9PM show mode: stage active + auto-ducking music
+  box2-stream rehearse [minutes]        stage active now for rehearsal (auto-reverts to schedule)
+  box2-stream auto | done               resume 9PM-2AM stage / 2AM-9PM privacy schedule
+  box2-stream stage | privacy           manual view lock without dropping stream
+  box2-stream music [auto|on|off|next|bed|walkup|vol <0..1>]   live music & mix control
+  box2-stream mark-set                  mark start of a comedy set right now
+  box2-stream clip [dur|--last-set] [label]   save lossless .mp4 clip without dropping stream
+  box2-stream clips                     list recent detected sets and saved .mp4 clips
+  box2-stream run                       the service loop (systemd runs this)
 
 Secrets (NVR login, Twitch key) live only in config.json (mode 600) and in
 process memory; nothing here prints or logs them.
 """
+import collections
 import concurrent.futures
 from datetime import datetime, timezone, timedelta
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -24,8 +37,10 @@ import signal
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 try:
@@ -36,8 +51,14 @@ except ImportError:
 
 HOME = Path(__file__).resolve().parent
 CONFIG, STATE, STATUS = HOME / 'config.json', HOME / 'state.json', HOME / 'status.json'
-STALL_SECONDS = 15
+STALL_SECONDS = 20
 FFMPEG = '/usr/bin/ffmpeg'
+FFPROBE = '/usr/bin/ffprobe'
+
+DEFAULT_SSD_ROOT = Path('/mnt/ssd')
+DEFAULT_CLIP_BASE = (DEFAULT_SSD_ROOT / 'box2-clips') if DEFAULT_SSD_ROOT.exists() else (HOME / 'clips')
+DEFAULT_MUSIC_DIR = (DEFAULT_SSD_ROOT / 'media' / 'box2-music') if DEFAULT_SSD_ROOT.exists() else (HOME / 'music')
+AUDIO_EXTS = ('.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.mp4')
 
 # Stage Director integration
 STAGE_DIR = Path("/home/joseph1/stage-director")
@@ -53,7 +74,11 @@ try:
     from stage_director.geometry import BoundingBox, StagePolygon
     from stage_director.tracking import PerformerTracker
     STAGE_DIRECTOR_AVAILABLE = True
-except Exception as _import_err:
+except Exception:
+    try:
+        import numpy as np  # still enable audio/clip math tests if stage_director path differs
+    except Exception:
+        np = None
     STAGE_DIRECTOR_AVAILABLE = False
 
 
@@ -66,16 +91,48 @@ def log(message):
 
 
 def write_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix('.tmp')
     tmp.write_text(json.dumps(value, indent=1) + '\n')
     tmp.replace(path)
 
 
-def desired():
+def read_state():
     try:
-        return json.loads(STATE.read_text()).get('desired', 'off')
+        data = json.loads(STATE.read_text())
+        return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
-        return 'off'
+        return {}
+
+
+def update_state(**updates):
+    cur = read_state()
+    for k, v in updates.items():
+        if v is None:
+            cur.pop(k, None)
+        else:
+            cur[k] = v
+    cur['set'] = now()
+    write_json(STATE, cur)
+    return cur
+
+
+def desired():
+    return read_state().get('desired', 'off')
+
+
+def effective_refresh_hours(cfg=None, state_data=None):
+    """Resolve scheduled VOD rollover interval (0 = uninterrupted marathon stream)."""
+    st = state_data if state_data is not None else read_state()
+    cadence = st.get('cadence')
+    if cadence == 'marathon':
+        return 0
+    if cadence == 'vod':
+        vod_h = int((cfg or {}).get('vod_refresh_hours', 3))
+        return vod_h if vod_h > 0 else 3
+    # Default to 0 (uninterrupted marathon mode) unless explicitly configured > 0
+    return int((cfg or {}).get('scheduled_refresh_hours', 0))
 
 
 def is_within_show_hours(now_dt=None, start_hour=21, end_hour=2):
@@ -92,32 +149,41 @@ def is_within_show_hours(now_dt=None, start_hour=21, end_hour=2):
     return h >= start_hour or h < end_hour
 
 
-def view_policy():
-    try:
-        v = json.loads(STATE.read_text()).get('view', 'auto')
-        if v in ('privacy', 'standby', 'brb'):
-            return 'privacy'
-        if v == 'stage':
-            return 'stage'
-    except (OSError, ValueError):
-        pass
+def view_policy(now_epoch=None, state_data=None):
+    """Return ('privacy' | 'stage' | 'rehearse' | 'auto'). Timed rehearse overrides auto-expire."""
+    st = state_data if state_data is not None else read_state()
+    v = st.get('view', 'auto')
+    until = st.get('view_until')
+    if until is not None:
+        cur_ts = float(now_epoch if now_epoch is not None else time.time())
+        try:
+            if cur_ts >= float(until):
+                return 'auto'
+        except (TypeError, ValueError):
+            return 'auto'
+    if v in ('privacy', 'standby', 'brb'):
+        return 'privacy'
+    if v == 'rehearse':
+        return 'rehearse'
+    if v == 'stage':
+        return 'stage'
     return 'auto'
 
 
-def desired_view(ticker_path="/home/joseph1/box2-stream/ticker.json", now_dt=None, start_hour=21, end_hour=2):
-    """Resolve active view ('privacy' vs 'stage') from explicit overrides or the 9PM-2AM schedule."""
+def desired_view(ticker_path="/home/joseph1/box2-stream/ticker.json", now_dt=None, start_hour=21, end_hour=2, now_epoch=None):
+    """Resolve active view ('privacy' vs 'stage') from explicit overrides, timed rehearsal, or 9PM-2AM schedule."""
     try:
-        if os.path.exists(ticker_path):
+        if ticker_path and os.path.exists(ticker_path):
             tk = json.loads(Path(ticker_path).read_text())
             if tk.get('privacy_mode') is True or tk.get('privacy_placeholder', {}).get('enabled') is True:
                 return 'privacy'
     except (OSError, ValueError):
         pass
 
-    pol = view_policy()
+    pol = view_policy(now_epoch=now_epoch)
     if pol == 'privacy':
         return 'privacy'
-    if pol == 'stage':
+    if pol in ('stage', 'rehearse'):
         return 'stage'
     return 'stage' if is_within_show_hours(now_dt=now_dt, start_hour=start_hour, end_hour=end_hour) else 'privacy'
 
@@ -206,6 +272,14 @@ def flv_url_ch(ip, token, channel, stream='sub'):
     return f"http://{ip}/flv?port=1935&app=bcs&stream=channel{channel}_{stream}.bcs&token={token}"
 
 
+def rtsp_url_ch(ip, cfg, channel=None, stream=None):
+    ch = int(cfg.get('nvr_channel', 0) if channel is None else channel) + 1
+    st = (cfg.get('nvr_stream', 'sub') if stream is None else stream)
+    u = urllib.parse.quote(str(cfg.get('nvr_user', '')), safe='')
+    p = urllib.parse.quote(str(cfg.get('nvr_password', '')), safe='')
+    return f"rtsp://{u}:{p}@{ip}:554/h264Preview_{ch:02d}_{st}"
+
+
 def rtmp_url(cfg, mode):
     return f"{cfg['twitch_server'].rstrip('/')}/{cfg['twitch_key']}" + ('?bandwidthtest=true' if mode == 'test' else '')
 
@@ -214,7 +288,820 @@ def scrub(text, secrets):
     for secret in secrets:
         if secret:
             text = text.replace(secret, '<hidden>')
+            text = text.replace(urllib.parse.quote(str(secret), safe=''), '<hidden>')
+    text = re.sub(r'rtsp://[^@\s]+@', 'rtsp://<hidden>@', text)
     return re.sub(r'(token|password|user)=[^&\s]+', r'\1=<hidden>', re.sub(r'rtmps?://\S+', '<twitch>', text))
+
+
+# ----- broadcast audio mixing, auto-ducking & playlist engine -----
+class AutoDuckEnvelope:
+    """Broadcast voice/stage auto-ducking sidechain + soft limiter.
+
+    - High-passes stage mic (<90 Hz rumble/hum removal) before measuring voice RMS.
+    - Fast sidechain attack (~60ms) when speech exceeds `voice_threshold_dbfs` (-35 dBFS).
+    - Hold timer (`hold_seconds` = 1.8s) + smooth release (`release_tau` = 1.2s) prevents
+      pumping between words or sentences.
+    - Stage-presence awareness (`is_performer_onstage`):
+      * In `"bed"` mode (default): keeps music tucked at `onstage_volume` (0.06) throughout
+        an onstage set so comedic pauses never trigger loud music swells, then fades back
+        up to `idle_volume` (0.34) when the stage empties.
+      * In `"walkup"` mode: plays walk-up intro for `walkup_seconds` (8.0s) when someone
+        steps onto the stage (ducking immediately if they speak), then fades completely to
+        0.0 for a clean dry comedy set until they step off stage.
+    """
+
+    def __init__(
+        self,
+        idle_volume=0.34,
+        ducked_volume=0.05,
+        onstage_volume=0.06,
+        walkup_volume=0.24,
+        walkup_seconds=8.0,
+        onstage_mode="bed",
+        mic_gain=1.85,
+        voice_threshold_dbfs=-35.0,
+        hold_seconds=1.8,
+        attack_tau=0.06,
+        onstage_fade_tau=0.45,
+        release_tau=1.20,
+        hp_window=320,
+    ):
+        self.idle_volume = float(idle_volume)
+        self.ducked_volume = float(ducked_volume)
+        self.onstage_volume = float(onstage_volume)
+        self.walkup_volume = float(walkup_volume)
+        self.walkup_seconds = float(walkup_seconds)
+        self.onstage_mode = str(onstage_mode)
+        self.mic_gain = float(mic_gain)
+        self.voice_threshold_dbfs = float(voice_threshold_dbfs)
+        self.hold_seconds = float(hold_seconds)
+        self.attack_tau = float(attack_tau)
+        self.onstage_fade_tau = float(onstage_fade_tau)
+        self.release_tau = float(release_tau)
+        self.hp_window = max(8, int(hp_window))
+
+        self.current_gain = 0.0
+        self.voice_hold_until = -1e9
+        self.onstage_since = None
+        self._hp_tail = None
+
+    def highpass_rumble_cut(self, mono_f32):
+        """Fast causal moving-average subtraction cutting <90 Hz rumble & DC offset."""
+        if mono_f32.size == 0:
+            return mono_f32
+        w = self.hp_window
+        if self._hp_tail is None or self._hp_tail.size != w - 1:
+            self._hp_tail = np.zeros(w - 1, dtype=np.float32)
+        padded = np.concatenate([self._hp_tail, mono_f32])
+        self._hp_tail = padded[-(w - 1):].copy()
+        csum = np.cumsum(np.insert(padded, 0, 0.0, axis=0), dtype=np.float64)
+        lowpass = ((csum[w:] - csum[:-w]) / float(w)).astype(np.float32)
+        return mono_f32 - lowpass
+
+    @staticmethod
+    def compute_rms_dbfs(samples_f32):
+        if samples_f32.size == 0:
+            return -100.0
+        rms = float(np.sqrt(np.mean(np.square(samples_f32, dtype=np.float64))))
+        return 20.0 * math.log10(max(rms, 1e-5))
+
+    def step(self, mic_rms_dbfs, is_performer_onstage, music_enabled, now_mono, dt=0.05):
+        dt = max(0.001, float(dt))
+        if mic_rms_dbfs >= self.voice_threshold_dbfs:
+            self.voice_hold_until = float(now_mono) + self.hold_seconds
+        voice_active = float(now_mono) < self.voice_hold_until
+
+        if is_performer_onstage:
+            if self.onstage_since is None:
+                self.onstage_since = float(now_mono)
+            onstage_dur = float(now_mono) - self.onstage_since
+        else:
+            self.onstage_since = None
+            onstage_dur = 0.0
+
+        if not music_enabled:
+            target = 0.0
+        elif voice_active:
+            target = 0.02 if (is_performer_onstage and self.onstage_mode == "walkup" and onstage_dur > self.walkup_seconds) else self.ducked_volume
+        elif is_performer_onstage:
+            if self.onstage_mode == "walkup":
+                target = self.walkup_volume if onstage_dur <= self.walkup_seconds else 0.0
+            else:
+                target = self.onstage_volume
+        else:
+            target = self.idle_volume
+
+        if target < self.current_gain:
+            tau = self.attack_tau if voice_active else self.onstage_fade_tau
+        else:
+            tau = self.release_tau
+
+        alpha = 1.0 - math.exp(-dt / max(0.005, tau))
+        self.current_gain += alpha * (target - self.current_gain)
+        if self.current_gain < 0.0005 and target == 0.0:
+            self.current_gain = 0.0
+        return self.current_gain, voice_active
+
+    def mix_and_limit(self, mic_stereo_f32, music_stereo_f32, music_gain):
+        """Combine gained stage mic + ducked stereo music with soft-knee tanh broadcast limiting."""
+        mixed = mic_stereo_f32 * self.mic_gain + music_stereo_f32 * float(music_gain)
+        # Transparent linear pass below 0.70, smooth soft-knee saturation ceiling at 0.96
+        abs_m = np.abs(mixed)
+        over = abs_m > 0.70
+        if np.any(over):
+            sign = np.sign(mixed[over])
+            excess = (abs_m[over] - 0.70) / 0.26
+            mixed = mixed.copy()
+            mixed[over] = sign * (0.70 + 0.26 * np.tanh(excess))
+        return np.clip(mixed * 32767.0, -32767.0, 32767.0).astype(np.int16)
+
+
+class BroadcastAudioMixer:
+    """Real-time 48kHz stereo PCM broadcast mixer feeding FFmpeg via local OS pipe.
+
+    Decouples FFmpeg completely from NVR network sockets so NVR audio hiccups or
+    playlist track transitions never stall or drop the Twitch RTMP stream.
+    """
+
+    SAMPLE_RATE = 48000
+    CHANNELS = 2
+    CHUNK_SEC = 0.05  # 20 chunks/sec = 2400 stereo samples = 9600 bytes per tick
+    CHUNK_FRAMES = int(SAMPLE_RATE * CHUNK_SEC)
+    CHUNK_BYTES = CHUNK_FRAMES * CHANNELS * 2
+
+    def __init__(
+        self,
+        cfg,
+        ip=None,
+        cam0_url_getter=None,
+        view_getter=None,
+        policy_getter=None,
+        onstage_getter=None,
+        secrets=None,
+        ticker_path="/home/joseph1/box2-stream/ticker.json",
+    ):
+        self.cfg = cfg or {}
+        self.ip = ip
+        self.cam0_url_getter = cam0_url_getter
+        self.view_getter = view_getter or (lambda: "stage")
+        self.policy_getter = policy_getter or (lambda: "auto")
+        self.onstage_getter = onstage_getter or (lambda: False)
+        self.secrets = secrets or []
+        self.ticker_path = ticker_path
+
+        self.music_dir = Path(self.cfg.get("music_dir", str(DEFAULT_MUSIC_DIR)))
+        self.music_dir.mkdir(parents=True, exist_ok=True)
+
+        self.envelope = AutoDuckEnvelope(
+            idle_volume=float(self.cfg.get("music_idle_volume", 0.34)),
+            ducked_volume=float(self.cfg.get("music_ducked_volume", 0.05)),
+            onstage_volume=float(self.cfg.get("music_onstage_volume", 0.06)),
+            walkup_volume=float(self.cfg.get("music_walkup_volume", 0.24)),
+            walkup_seconds=float(self.cfg.get("music_walkup_seconds", 8.0)),
+            onstage_mode=str(self.cfg.get("music_onstage_mode", "bed")),
+            mic_gain=float(self.cfg.get("mic_gain", 1.85)),
+            voice_threshold_dbfs=float(self.cfg.get("voice_threshold_dbfs", -35.0)),
+        )
+
+        self.read_fd, self.write_fd = os.pipe()
+        self._stop_event = threading.Event()
+        self._mic_queue = collections.deque(maxlen=5)   # max 250ms buffer for tight lip-sync
+        self._music_queue = collections.deque(maxlen=16)
+        self._mic_lock = threading.Lock()
+        self._music_lock = threading.Lock()
+        self._mic_proc = None
+        self._music_proc = None
+
+        self._music_mode = "auto"  # "auto" (on during scheduled/showtime stage), "on", "off"
+        self._mute_mic_in_privacy = bool(self.cfg.get("mute_mic_in_privacy", False))
+        self._skip_seq = 0
+        self._last_cfg_poll = 0.0
+        self._current_track = ""
+        self._music_desired_now = False
+
+        self.stats = {
+            "audio_mixer": "active",
+            "mic_dbfs": -60.0,
+            "voice_ducking": False,
+            "music_mode": "auto",
+            "music_playing": False,
+            "music_track": "",
+            "music_gain": 0.0,
+            "music_onstage_mode": self.envelope.onstage_mode,
+        }
+
+        self._poll_live_controls(force=True)
+        self._mic_thread = threading.Thread(target=self._mic_reader_worker, daemon=True)
+        self._music_thread = threading.Thread(target=self._music_reader_worker, daemon=True)
+        self._mix_thread = threading.Thread(target=self._mixer_loop, daemon=True)
+        self._mic_thread.start()
+        self._music_thread.start()
+        self._mix_thread.start()
+
+    def _poll_live_controls(self, force=False):
+        now_mono = time.monotonic()
+        if not force and (now_mono - self._last_cfg_poll < 1.0):
+            return
+        self._last_cfg_poll = now_mono
+
+        # 1. Optional ticker.json audio_mixer overrides
+        if self.ticker_path and os.path.exists(self.ticker_path):
+            try:
+                tk = json.loads(Path(self.ticker_path).read_text())
+                am = tk.get("audio_mixer", {})
+                if isinstance(am, dict) and am:
+                    if "idle_volume" in am:
+                        self.envelope.idle_volume = float(am["idle_volume"])
+                    if "ducked_volume" in am:
+                        self.envelope.ducked_volume = float(am["ducked_volume"])
+                    if "onstage_volume" in am:
+                        self.envelope.onstage_volume = float(am["onstage_volume"])
+                    if "mic_gain" in am:
+                        self.envelope.mic_gain = float(am["mic_gain"])
+                    if "voice_threshold_dbfs" in am:
+                        self.envelope.voice_threshold_dbfs = float(am["voice_threshold_dbfs"])
+                    if "mute_mic_in_privacy" in am:
+                        self._mute_mic_in_privacy = bool(am["mute_mic_in_privacy"])
+            except Exception:
+                pass
+
+        # 2. Live CLI state.json music controls
+        st = read_state()
+        m_cfg = st.get("music", {})
+        if isinstance(m_cfg, dict):
+            mode = m_cfg.get("mode", "auto")
+            if mode in ("auto", "on", "off"):
+                self._music_mode = mode
+            if "idle_volume" in m_cfg:
+                self.envelope.idle_volume = max(0.0, min(1.0, float(m_cfg["idle_volume"])))
+            if "onstage_mode" in m_cfg and m_cfg["onstage_mode"] in ("bed", "walkup"):
+                self.envelope.onstage_mode = m_cfg["onstage_mode"]
+            new_skip = int(m_cfg.get("skip_seq", 0))
+            if new_skip != self._skip_seq:
+                self._skip_seq = new_skip
+                self._terminate_proc(self._music_proc)
+
+        cur_view = self.view_getter()
+        cur_pol = self.policy_getter()
+        if self._music_mode == "on":
+            self._music_desired_now = True
+        elif self._music_mode == "off":
+            self._music_desired_now = False
+        else:
+            # "auto": play warm-up/show music during active stage hours/showtime, stay quiet in privacy & rehearsal
+            self._music_desired_now = (cur_view == "stage" and cur_pol != "rehearse")
+
+    @staticmethod
+    def _terminate_proc(proc):
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    def _mic_reader_worker(self):
+        use_rtsp = bool(self.ip and self.cfg.get("nvr_user") and self.cfg.get("nvr_password"))
+        fail_streak = 0
+        while not self._stop_event.is_set():
+            src = None
+            input_args = []
+            if use_rtsp and fail_streak < 3:
+                src = rtsp_url_ch(self.ip, self.cfg)
+                input_args = ["-rtsp_transport", "tcp", "-timeout", "8000000", "-i", src]
+            elif self.cam0_url_getter:
+                src = self.cam0_url_getter()
+                if src:
+                    input_args = ["-rw_timeout", "10000000", "-i", src]
+            if not src or not input_args:
+                time.sleep(1.5)
+                continue
+
+            cmd = [
+                FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error",
+                *input_args,
+                "-vn", "-ac", "2", "-ar", str(self.SAMPLE_RATE), "-f", "s16le", "pipe:1",
+            ]
+            proc = None
+            got_audio = False
+            try:
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                self._mic_proc = proc
+                while not self._stop_event.is_set():
+                    buf = proc.stdout.read(self.CHUNK_BYTES)
+                    if not buf or len(buf) < self.CHUNK_BYTES:
+                        break
+                    got_audio = True
+                    fail_streak = 0
+                    with self._mic_lock:
+                        self._mic_queue.append(buf)
+            except Exception as exc:
+                log(f"Audio mixer mic reader warning: {scrub(str(exc), self.secrets)}")
+            finally:
+                self._terminate_proc(proc)
+                self._mic_proc = None
+
+            if not got_audio:
+                fail_streak += 1
+            if not self._stop_event.is_set():
+                time.sleep(1.0)
+
+    def _list_tracks(self):
+        if not self.music_dir.exists():
+            return []
+        tracks = [
+            p for p in sorted(self.music_dir.iterdir())
+            if p.is_file() and p.suffix.lower() in AUDIO_EXTS and not p.name.startswith(".")
+        ]
+        return tracks
+
+    def _music_reader_worker(self):
+        track_idx = 0
+        while not self._stop_event.is_set():
+            if not self._music_desired_now and self.envelope.current_gain <= 0.001:
+                self._current_track = ""
+                with self._music_lock:
+                    self._music_queue.clear()
+                time.sleep(0.25)
+                continue
+
+            tracks = self._list_tracks()
+            if not tracks:
+                self._current_track = ""
+                time.sleep(2.0)
+                continue
+
+            track_path = tracks[track_idx % len(tracks)]
+            track_idx = (track_idx + 1) % max(1, len(tracks))
+            self._current_track = track_path.stem
+            local_skip = self._skip_seq
+
+            cmd = [
+                FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error",
+                "-i", str(track_path),
+                "-vn",
+                "-af", "dynaudnorm=f=250:g=15:p=0.85",
+                "-ac", "2", "-ar", str(self.SAMPLE_RATE), "-f", "s16le", "pipe:1",
+            ]
+            proc = None
+            try:
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                self._music_proc = proc
+                while not self._stop_event.is_set() and local_skip == self._skip_seq:
+                    if not self._music_desired_now and self.envelope.current_gain <= 0.001:
+                        break
+                    with self._music_lock:
+                        q_len = len(self._music_queue)
+                    if q_len >= 12:
+                        time.sleep(0.03)
+                        continue
+                    buf = proc.stdout.read(self.CHUNK_BYTES)
+                    if not buf:
+                        break
+                    if len(buf) < self.CHUNK_BYTES:
+                        buf = buf + b"\x00" * (self.CHUNK_BYTES - len(buf))
+                    with self._music_lock:
+                        self._music_queue.append(buf)
+            except Exception as exc:
+                log(f"Audio mixer track reader warning: {exc}")
+            finally:
+                self._terminate_proc(proc)
+                self._music_proc = None
+
+    def _mixer_loop(self):
+        zero_stereo = np.zeros((self.CHUNK_FRAMES, 2), dtype=np.float32)
+        zero_bytes = b"\x00" * self.CHUNK_BYTES
+        next_tick = time.monotonic()
+
+        try:
+            while not self._stop_event.is_set():
+                now_mono = time.monotonic()
+                if now_mono < next_tick:
+                    time.sleep(min(0.02, next_tick - now_mono))
+                    continue
+                next_tick += self.CHUNK_SEC
+                if now_mono - next_tick > 0.25:
+                    next_tick = now_mono + self.CHUNK_SEC
+
+                self._poll_live_controls()
+
+                with self._mic_lock:
+                    mic_raw = self._mic_queue.popleft() if self._mic_queue else None
+
+                cur_view = self.view_getter()
+                mute_mic = (cur_view == "privacy" and self._mute_mic_in_privacy)
+
+                if mic_raw is not None and not mute_mic and np is not None:
+                    mic_i16 = np.frombuffer(mic_raw, dtype=np.int16).reshape(-1, 2)
+                    mic_f32 = mic_i16.astype(np.float32) / 32768.0
+                    mono = 0.5 * (mic_f32[:, 0] + mic_f32[:, 1])
+                    mono_hp = self.envelope.highpass_rumble_cut(mono)
+                    # Broadcast stereo vocal cleanup: apply rumble cut to both channels
+                    rumble = (mono - mono_hp)[:, None]
+                    mic_clean = mic_f32 - rumble
+                    mic_dbfs = self.envelope.compute_rms_dbfs(mono_hp)
+                else:
+                    mic_clean = zero_stereo
+                    mic_dbfs = -90.0
+
+                is_onstage = bool(self.onstage_getter()) if cur_view == "stage" else False
+                has_tracks = bool(self._current_track)
+                music_gain, voice_active = self.envelope.step(
+                    mic_rms_dbfs=mic_dbfs,
+                    is_performer_onstage=is_onstage,
+                    music_enabled=(self._music_desired_now and has_tracks),
+                    now_mono=now_mono,
+                    dt=self.CHUNK_SEC,
+                )
+
+                music_raw = None
+                if music_gain > 0.0005:
+                    with self._music_lock:
+                        music_raw = self._music_queue.popleft() if self._music_queue else None
+
+                if music_raw is not None and np is not None:
+                    music_f32 = np.frombuffer(music_raw, dtype=np.int16).reshape(-1, 2).astype(np.float32) / 32768.0
+                else:
+                    music_f32 = zero_stereo
+
+                if np is not None:
+                    out_i16 = self.envelope.mix_and_limit(mic_clean, music_f32, music_gain)
+                    out_bytes = out_i16.tobytes()
+                else:
+                    out_bytes = mic_raw if (mic_raw and not mute_mic) else zero_bytes
+
+                self.stats.update(
+                    mic_dbfs=round(mic_dbfs, 1),
+                    voice_ducking=bool(voice_active),
+                    music_mode=self._music_mode,
+                    music_playing=bool(music_gain > 0.005 and music_raw is not None),
+                    music_track=self._current_track if self._music_desired_now else "",
+                    music_gain=round(music_gain, 3),
+                    music_onstage_mode=self.envelope.onstage_mode,
+                )
+
+                try:
+                    os.write(self.write_fd, out_bytes)
+                except OSError:
+                    break
+        finally:
+            try:
+                os.close(self.write_fd)
+            except OSError:
+                pass
+
+    def stop(self):
+        self._stop_event.set()
+        self._terminate_proc(self._mic_proc)
+        self._terminate_proc(self._music_proc)
+        try:
+            os.close(self.write_fd)
+        except OSError:
+            pass
+        try:
+            os.close(self.read_fd)
+        except OSError:
+            pass
+
+
+# ----- non-blocking primary camera capture -----
+class PrimaryCameraReader:
+    """Dedicated background reader for NVR Channel 0 so DirectorStream never blocks on TCP stalls."""
+
+    def __init__(self, initial_url, url_getter=None, on_reconnect=None):
+        self.url_getter = url_getter or (lambda: initial_url)
+        self.on_reconnect = on_reconnect
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self.latest_frame = None
+        self.last_frame_mono = 0.0
+        self.frame_seq = 0
+
+        cap = self._open_capture(initial_url)
+        if not cap.isOpened():
+            raise RuntimeError("PrimaryCameraReader: Failed to open initial video source")
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            cap.release()
+            raise RuntimeError("PrimaryCameraReader: Failed to read initial frame from camera")
+
+        self._cap = cap
+        self.latest_frame = frame.copy()
+        self.last_frame_mono = time.monotonic()
+        self.frame_seq = 1
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    @staticmethod
+    def _open_capture(url):
+        cap = cv2.VideoCapture()
+        for prop_name, val in (("CAP_PROP_OPEN_TIMEOUT_MSEC", 5000), ("CAP_PROP_READ_TIMEOUT_MSEC", 5000)):
+            prop = getattr(cv2, prop_name, None)
+            if prop is not None:
+                try:
+                    cap.set(prop, val)
+                except Exception:
+                    pass
+        cap.open(url)
+        return cap
+
+    def _worker(self):
+        fail_count = 0
+        while not self._stop_event.is_set():
+            cap = self._cap
+            if cap is None or not cap.isOpened():
+                fail_count = 99
+            else:
+                try:
+                    ret, frame = cap.read()
+                except Exception:
+                    ret, frame = False, None
+
+                if ret and frame is not None:
+                    fail_count = 0
+                    with self._lock:
+                        self.latest_frame = frame
+                        self.last_frame_mono = time.monotonic()
+                        self.frame_seq += 1
+                    continue
+                fail_count += 1
+
+            if fail_count >= 12 or (time.monotonic() - self.last_frame_mono > 4.0):
+                try:
+                    if cap is not None:
+                        cap.release()
+                except Exception:
+                    pass
+                self._cap = None
+                if self.on_reconnect:
+                    try:
+                        self.on_reconnect()
+                    except Exception:
+                        pass
+                url = self.url_getter()
+                if url and not self._stop_event.is_set():
+                    new_cap = self._open_capture(url)
+                    if new_cap.isOpened():
+                        ret, frame = new_cap.read()
+                        if ret and frame is not None:
+                            self._cap = new_cap
+                            fail_count = 0
+                            with self._lock:
+                                self.latest_frame = frame
+                                self.last_frame_mono = time.monotonic()
+                                self.frame_seq += 1
+                            log("Stage Director: Camera connection recovered seamlessly (zero Twitch dropped frames)")
+                            continue
+                        new_cap.release()
+                time.sleep(1.0)
+            else:
+                time.sleep(0.05)
+
+        if self._cap is not None:
+            try:
+                self._cap.release()
+            except Exception:
+                pass
+
+    def get_frame(self):
+        """Non-blocking (<0.01ms) access to latest camera frame and freshness flag."""
+        with self._lock:
+            age = time.monotonic() - self.last_frame_mono
+            frame = self.latest_frame.copy() if self.latest_frame is not None else None
+        return frame, (age < 1.5)
+
+    def stop(self):
+        self._stop_event.set()
+
+
+# ----- rolling SSD clip ring buffer & set logger -----
+def parse_duration_seconds(spec, default_seconds=600.0):
+    """Parse flexible clip duration strings ('10m', '90s', '1h15m', '12') into seconds."""
+    if spec is None or str(spec).strip() == "":
+        return float(default_seconds)
+    s = str(spec).strip().lower()
+    if re.fullmatch(r'\d+(\.\d+)?', s):
+        return max(5.0, float(s) * 60.0)  # bare number defaults to minutes (e.g. `clip 10` = 10 minutes)
+    total = 0.0
+    matched = False
+    for val, unit in re.findall(r'(\d+(?:\.\d+)?)\s*([hms])', s):
+        matched = True
+        v = float(val)
+        if unit == 'h':
+            total += v * 3600.0
+        elif unit == 'm':
+            total += v * 60.0
+        elif unit == 's':
+            total += v
+    if not matched:
+        raise ValueError(f"Unrecognized duration '{spec}' (examples: 10m, 90s, 15, --last-set)")
+    return max(5.0, total)
+
+
+def record_set_event(sets_file, start_epoch, end_epoch, event_type="auto_set", label=""):
+    dur = max(0.0, float(end_epoch) - float(start_epoch))
+    entry = {
+        "type": event_type,
+        "label": label,
+        "start_epoch": round(float(start_epoch), 2),
+        "end_epoch": round(float(end_epoch), 2),
+        "duration_s": round(dur, 1),
+        "start_local": datetime.fromtimestamp(start_epoch).strftime('%Y-%m-%d %I:%M:%S %p'),
+        "end_local": datetime.fromtimestamp(end_epoch).strftime('%Y-%m-%d %I:%M:%S %p'),
+    }
+    p = Path(sets_file)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+    return entry
+
+
+def load_recent_sets(sets_file, limit=15):
+    p = Path(sets_file)
+    if not p.exists():
+        return []
+    out = []
+    try:
+        for line in p.read_text().splitlines():
+            line = line.strip()
+            if line:
+                out.append(json.loads(line))
+    except Exception:
+        pass
+    return out[-limit:]
+
+
+def select_ring_segments(ring_dir, start_epoch, end_epoch, seg_seconds=15.0):
+    """Select contiguous .ts ring segments covering [start_epoch, end_epoch], handling wrap-around via mtime."""
+    ring_path = Path(ring_dir)
+    if not ring_path.exists():
+        return [], 0.0
+
+    items = []
+    for p in ring_path.glob("seg_*.ts"):
+        try:
+            st = p.stat()
+            if st.st_size > 1024:
+                items.append((st.st_mtime, p))
+        except OSError:
+            continue
+
+    if not items:
+        return [], 0.0
+
+    # Sort chronologically by mtime (handles segment_wrap seg_2879 -> seg_0000 seamlessly)
+    items.sort(key=lambda t: t[0])
+
+    # Keep only the latest contiguous stream run if there is a multi-minute gap from an old boot
+    contiguous = [items[-1]]
+    max_gap = max(45.0, seg_seconds * 3.5)
+    for idx in range(len(items) - 2, -1, -1):
+        newer_mtime = contiguous[-1][0]
+        cur_mtime = items[idx][0]
+        if newer_mtime - cur_mtime > max_gap:
+            break
+        contiguous.append(items[idx])
+    contiguous.reverse()
+
+    # Each segment file's mtime is when that segment finished writing (~seg_end); seg_start ~= mtime - seg_seconds
+    selected = []
+    for mtime, p in contiguous:
+        seg_start = mtime - seg_seconds
+        seg_end = mtime
+        if seg_end >= (start_epoch - 2.0) and seg_start <= (end_epoch + seg_seconds):
+            selected.append((mtime, p))
+
+    if not selected:
+        return [], 0.0
+
+    first_seg_start = selected[0][0] - seg_seconds
+    trim_offset = max(0.0, float(start_epoch) - first_seg_start)
+    return [p for _, p in selected], trim_offset
+
+
+def resolve_last_set_window(sets_file, status_file=STATUS, state_data=None, now_epoch=None, pre_roll=10.0, post_roll=6.0):
+    """Determine [start_epoch, end_epoch, source_desc] for `box2-stream clip --last-set`."""
+    now_ts = float(now_epoch if now_epoch is not None else time.time())
+    st = state_data if state_data is not None else read_state()
+
+    # 1. Explicit manual `mark-set` marker if within last 2 hours
+    mark_ts = st.get("manual_set_start_epoch")
+    if mark_ts is not None and 5.0 <= (now_ts - float(mark_ts)) <= 7200.0:
+        return float(mark_ts) - pre_roll, now_ts, "manual set marker"
+
+    # 2. Currently active onstage set in status.json (e.g. comic just stepped off <25s ago)
+    try:
+        if status_file and Path(status_file).exists():
+            live_st = json.loads(Path(status_file).read_text())
+            act_start = live_st.get("active_set_start_epoch")
+            if act_start is not None and 8.0 <= (now_ts - float(act_start)) <= 7200.0:
+                return float(act_start) - pre_roll, now_ts, "active onstage set"
+    except Exception:
+        pass
+
+    # 3. Most recent completed onstage set in sets.jsonl within last 90 minutes
+    recent = load_recent_sets(sets_file, limit=10)
+    if recent:
+        last = recent[-1]
+        end_ts = float(last["end_epoch"])
+        start_ts = float(last["start_epoch"])
+        if (now_ts - end_ts) <= 5400.0:
+            return start_ts - pre_roll, min(now_ts, end_ts + post_roll), f"detected set ({int(last.get('duration_s', 0))}s)"
+
+    # 4. Fallback: last 10 minutes
+    return now_ts - 600.0, now_ts, "last 10m fallback (no recent set marker)"
+
+
+def extract_clip(
+    duration_or_mode=None,
+    label=None,
+    clip_base=DEFAULT_CLIP_BASE,
+    status_file=STATUS,
+    seg_seconds=15.0,
+):
+    """Losslessly extract an .mp4 clip from the rolling .ts ring buffer without interrupting Twitch."""
+    clip_base = Path(clip_base)
+    ring_dir = clip_base / "ring"
+    saved_dir = clip_base / "saved"
+    sets_file = clip_base / "sets.jsonl"
+    saved_dir.mkdir(parents=True, exist_ok=True)
+
+    now_ts = time.time()
+    mode_str = str(duration_or_mode or "").strip().lower()
+    if mode_str in ("", "--last-set", "last-set", "set"):
+        start_epoch, end_epoch, source_desc = resolve_last_set_window(
+            sets_file=sets_file, status_file=status_file, now_epoch=now_ts
+        )
+        # Clear one-shot manual set marker once clipped
+        if source_desc == "manual set marker":
+            update_state(manual_set_start_epoch=None)
+    else:
+        dur_s = parse_duration_seconds(duration_or_mode, default_seconds=600.0)
+        start_epoch = now_ts - dur_s
+        end_epoch = now_ts
+        source_desc = f"last {int(round(dur_s))}s"
+
+    segs, trim_offset = select_ring_segments(ring_dir, start_epoch, end_epoch, seg_seconds=seg_seconds)
+    if not segs:
+        raise RuntimeError(f"No rolling clip segments found in {ring_dir} yet (give stream ~15-30s after start).")
+
+    target_dur = max(5.0, end_epoch - start_epoch)
+    safe_label = re.sub(r'[^a-zA-Z0-9_-]+', '_', str(label or 'set')).strip('_') or 'set'
+    ts_str = datetime.fromtimestamp(now_ts).strftime('%Y%m%d_%H%M%S')
+    out_mp4 = saved_dir / f"clip_{ts_str}_{safe_label}.mp4"
+
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as tf:
+        concat_path = tf.name
+        for seg in segs:
+            escaped = str(seg).replace("'", "'\\''")
+            tf.write(f"file '{escaped}'\n")
+
+    try:
+        cmd = [
+            FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "concat", "-safe", "0", "-i", concat_path,
+        ]
+        if trim_offset >= 2.0:
+            cmd.extend(["-ss", f"{trim_offset:.2f}"])
+        cmd.extend([
+            "-t", f"{target_dur + 4.0:.2f}",
+            "-c", "copy",
+            "-bsf:a", "aac_adtstoasc",
+            "-movflags", "+faststart",
+            str(out_mp4),
+        ])
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if res.returncode != 0:
+            raise RuntimeError(f"FFmpeg clip remux failed: {res.stderr.strip()}")
+    finally:
+        try:
+            os.unlink(concat_path)
+        except OSError:
+            pass
+
+    size_mb = out_mp4.stat().st_size / (1024.0 * 1024.0)
+    actual_dur = target_dur
+    if os.path.exists(FFPROBE):
+        try:
+            pr = subprocess.run(
+                [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(out_mp4)],
+                capture_output=True, text=True, timeout=5,
+            )
+            if pr.returncode == 0 and pr.stdout.strip():
+                actual_dur = float(pr.stdout.strip())
+        except Exception:
+            pass
+
+    return {
+        "path": str(out_mp4),
+        "duration_s": round(actual_dur, 1),
+        "size_mb": round(size_mb, 2),
+        "segments_used": len(segs),
+        "source": source_desc,
+    }
 
 
 # ----- streaming implementations -----
@@ -272,8 +1159,8 @@ class Stream:
                 os.killpg(self.proc.pid, signal.SIGKILL)
 
 
-def next_scheduled_refresh_time(interval_hours=3):
-    """Calculates the next top-of-the-hour timestamp divisible by interval_hours."""
+def next_scheduled_refresh_time(interval_hours=0):
+    """Calculates the next top-of-the-hour timestamp divisible by interval_hours (None in marathon mode)."""
     if not interval_hours or interval_hours <= 0:
         return None
     now_dt = datetime.now()
@@ -285,13 +1172,13 @@ def next_scheduled_refresh_time(interval_hours=3):
 
 class TickerOverlay:
     """Renders broadcast header banner with live moving timestamp, scrolling ticker tape,
-    and dynamic warnings/countdown for scheduled 3-hour VOD resets.
+    centered STAGE STANDBY badge, and optional warnings when 3-hour VOD mode is active.
     """
 
-    def __init__(self, config_path="/home/joseph1/box2-stream/ticker.json", top_h=110, refresh_hours=3):
+    def __init__(self, config_path="/home/joseph1/box2-stream/ticker.json", top_h=110, refresh_hours=0):
         self.config_path = config_path
         self.top_h = top_h
-        self.refresh_hours = refresh_hours
+        self.refresh_hours = int(refresh_hours)
         self.last_load = 0.0
         self.last_countdown_update = 0.0
         self.current_rem_sec = None
@@ -310,12 +1197,20 @@ class TickerOverlay:
         self.full_ticker_str = ""
         self._update_full_str()
 
+    def set_refresh_hours(self, refresh_hours):
+        rh = int(refresh_hours)
+        if rh != self.refresh_hours:
+            self.refresh_hours = rh
+            self._update_full_str()
+
     def _update_full_str(self, test_rem_sec=None):
         raw_msgs = list(self.data.get("messages", []))
+        if self.refresh_hours <= 0 and test_rem_sec is None:
+            # Strip static 3-hour VOD drop notices automatically when running in uninterrupted marathon mode
+            raw_msgs = [m for m in raw_msgs if "3-hour vod" not in m.lower()]
         if not raw_msgs:
             raw_msgs = ["BOX 2 LIVE"]
 
-        # Calculate time remaining until next scheduled top-of-hour refresh
         rem_sec = test_rem_sec
         next_time_str = ""
         if rem_sec is None and self.refresh_hours > 0:
@@ -330,7 +1225,6 @@ class TickerOverlay:
         self.current_rem_sec = rem_sec
         self.next_time_str = next_time_str
 
-        msgs = []
         if rem_sec is not None:
             if rem_sec <= 60:
                 s = max(1, int(rem_sec))
@@ -369,7 +1263,6 @@ class TickerOverlay:
                 except Exception:
                     pass
 
-        # Update countdown string every 1.0s
         if now_mono - self.last_countdown_update >= 1.0:
             self.last_countdown_update = now_mono
             self._update_full_str()
@@ -380,7 +1273,6 @@ class TickerOverlay:
 
         # 1. Solid matte banner background (y=0 to top_h)
         frame_bgr[:self.top_h, :] = (15, 15, 18)
-        # Separator accent line
         cv2.line(frame_bgr, (0, self.top_h - 1), (w, self.top_h - 1), (70, 70, 80), 2)
 
         # 2. [● LIVE] badge
@@ -392,7 +1284,7 @@ class TickerOverlay:
         title = self.data.get("title", "BOX 2  |  CANTON REFINERY")
         cv2.putText(frame_bgr, title, (140, 33), cv2.FONT_HERSHEY_DUPLEX, 0.6, (220, 220, 220), 1)
 
-        # 4. Imminent reset warning badge (<= 180s) OR optional Standby badge in privacy placeholder mode
+        # 4. Imminent reset warning badge (<= 180s) OR centered STAGE STANDBY badge
         rem_sec = self.current_rem_sec
         if rem_sec is not None and rem_sec <= 180:
             if rem_sec <= 60:
@@ -441,13 +1333,13 @@ class TickerOverlay:
         cv2.rectangle(frame_bgr, (box_x1, box_y1), (box_x2, box_y2), box_border_color, 1)
 
         # 7. Smooth scrolling text clipped inside ROI
-        ticker_roi = frame_bgr[box_y1+1:box_y2-1, box_x1+2:box_x2-2]
+        ticker_roi = frame_bgr[box_y1 + 1:box_y2 - 1, box_x1 + 2:box_x2 - 2]
         roi_h, roi_w = ticker_roi.shape[:2]
 
         font = cv2.FONT_HERSHEY_DUPLEX
         font_scale = 0.58
         font_thick = 1
-        (tw, th), _ = cv2.getTextSize(self.full_ticker_str, font, font_scale, font_thick)
+        (tw, _), _ = cv2.getTextSize(self.full_ticker_str, font, font_scale, font_thick)
 
         speed = self.data.get("scroll_speed", 4)
         self.scroll_x = (self.scroll_x + speed) % max(1, tw)
@@ -459,10 +1351,8 @@ class TickerOverlay:
 
 
 class WallOverlay:
-    """Subtle painted wall branding displayed on the dark stage wall when stage is empty.
-    Fades smoothly away to 0 opacity when a performer is detected/framed.
-    Hot-reloads from ticker.json without restarting the stream.
-    """
+    """Subtle painted wall branding displayed on the dark stage wall when stage is empty."""
+
     def __init__(self, config_path="/home/joseph1/box2-stream/ticker.json", base_w=1280, base_h=720):
         self.config_path = config_path
         self.w = base_w
@@ -478,8 +1368,8 @@ class WallOverlay:
         self.max_opacity = 0.55
         self.fade_speed = 0.04
         self.color = (220, 222, 225)
-        self.style = "stacked"  # "stacked", "stencil_lines", "single_line"
-        
+        self.style = "stacked"
+
         self.current_opacity = 0.55
         self.roi_x1 = 0
         self.roi_y1 = 0
@@ -490,10 +1380,10 @@ class WallOverlay:
         self._load_config(force=True)
 
     def reload_if_needed(self, force=False):
-        now = time.monotonic()
-        if not force and (now - self.last_check < 2.0):
+        now_m = time.monotonic()
+        if not force and (now_m - self.last_check < 2.0):
             return
-        self.last_check = now
+        self.last_check = now_m
         if not os.path.exists(self.config_path):
             return
         try:
@@ -546,10 +1436,8 @@ class WallOverlay:
 
         overlay = Image.new("RGBA", (self.w, self.h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
-        
-        lines_to_render = self.lines
-        if self.style == "single_line":
-            lines_to_render = [" ".join(self.lines)]
+
+        lines_to_render = [" ".join(self.lines)] if self.style == "single_line" else self.lines
 
         curr_y = self.y
         total_w = 0
@@ -566,7 +1454,7 @@ class WallOverlay:
             line_w -= self.letter_spacing
             line_bboxes.append((line, line_w, char_widths))
             total_w = max(total_w, line_w)
-            
+
         for line, line_w, char_widths in line_bboxes:
             curr_x = self.x + (total_w - line_w) // 2
             for ch, cw in zip(list(line), char_widths):
@@ -581,7 +1469,7 @@ class WallOverlay:
         overlay_np = np.array(overlay)
         alpha_raw = overlay_np[:, :, 3].astype(float) / 255.0
         alpha_blur = cv2.GaussianBlur(alpha_raw, (3, 3), 0.6)
-        
+
         y_indices, x_indices = np.where(alpha_blur > 0.005)
         if len(y_indices) > 0:
             self.roi_y1, self.roi_y2 = max(0, int(y_indices.min()) - 2), min(self.h, int(y_indices.max()) + 3)
@@ -594,7 +1482,6 @@ class WallOverlay:
     def draw(self, frame_bgr, is_performer_framed=False):
         if not self.enabled or self.alpha_mask_roi is None:
             return
-
         self.reload_if_needed()
 
         target_opacity = 0.0 if is_performer_framed else self.max_opacity
@@ -612,20 +1499,14 @@ class WallOverlay:
 
 
 class CameraFeedWallOverlay:
-    """Live secondary camera feed (e.g. Parking Lot Center) projected onto the dark stage wall.
-    - Soft feathered edge projection or framed broadcast PIP
-    - Clean OSD watermark crop + anti-aliased INTER_AREA downscaling
-    - Motion-adaptive temporal EMA de-flicker filter (absorbs H.264 4s keyframe pop without motion blur)
-    - Fades smoothly to 0.0 opacity when a performer is confirmed/framed or camera zooms in
-    - Background worker thread with auto-reconnect and token refresh
-    - Live hot-reloading from ticker.json ("parking_lot_camera")
-    """
+    """Live secondary camera feed (Parking Lot Center) projected onto dark stage wall or privacy PIP."""
+
     def __init__(self, cam_url, config_path="/home/joseph1/box2-stream/ticker.json", base_w=1280, base_h=720):
         self.cam_url_getter = cam_url if callable(cam_url) else (lambda: cam_url)
         self.config_path = config_path
         self.base_w = base_w
         self.base_h = base_h
-        
+
         self.enabled = True
         self.x = 120
         self.y = 135
@@ -633,14 +1514,13 @@ class CameraFeedWallOverlay:
         self.height = 191
         self.max_opacity = 0.65
         self.fade_speed = 0.04
-        self.style = "feathered"  # "feathered" or "framed"
+        self.style = "feathered"
         self.show_label = True
         self.label = "PARKING LOT CENTER"
         self.crop_osd = True
-        # Normalized crop (x1, y1, x2, y2) removing Reolink logo, top ticking clock, and bottom OSD
         self.src_crop_norm = (0.105, 0.144, 0.894, 0.933)
         self.temporal_smooth = True
-        
+
         self.current_opacity = 0.65
         self.latest_frame = None
         self._ema_frame = None
@@ -648,13 +1528,11 @@ class CameraFeedWallOverlay:
         self._running = True
         self.last_check = 0
         self.last_mtime = 0
-        
-        # Precomputed feather mask
+
         self._feather_mask = None
         self._build_feather_mask()
         self._reload_config(force=True)
-        
-        # Start background reader thread
+
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._thread.start()
 
@@ -670,7 +1548,6 @@ class CameraFeedWallOverlay:
         self._feather_mask = mask[:, :, np.newaxis]
 
     def _preprocess_cam_frame(self, raw_frame):
-        """Crop OSD clutter, downsample with INTER_AREA, and apply motion-adaptive temporal de-flicker."""
         fh, fw = raw_frame.shape[:2]
         if self.crop_osd and fw >= 160 and fh >= 90:
             nx1, ny1, nx2, ny2 = self.src_crop_norm
@@ -690,8 +1567,6 @@ class CameraFeedWallOverlay:
             self._ema_frame = resized_f
         else:
             diff = np.max(np.abs(resized_f - self._ema_frame), axis=2, keepdims=True)
-            # Smooth static background (alpha=0.28 damps >70% of 4s H.264 I-frame pop & IR grain),
-            # while passing real motion (cars, headlights, pedestrians: diff > 22) crisply with zero ghosting
             alpha = np.where(diff > 22.0, 1.0, np.where(diff > 12.0, 0.65, 0.28)).astype(np.float32)
             self._ema_frame = self._ema_frame + alpha * (resized_f - self._ema_frame)
         return np.clip(self._ema_frame, 0.0, 255.0).astype(np.uint8)
@@ -705,7 +1580,7 @@ class CameraFeedWallOverlay:
                 if not url:
                     time.sleep(2.0)
                     continue
-                cap = cv2.VideoCapture(url)
+                cap = PrimaryCameraReader._open_capture(url)
                 if not cap.isOpened():
                     time.sleep(2.0)
                     continue
@@ -713,7 +1588,7 @@ class CameraFeedWallOverlay:
                     ret, frame = cap.read()
                     if not ret or frame is None:
                         fail_count += 1
-                        if fail_count > 20:  # ~1s of read failure: break out to reconnect with fresh token
+                        if fail_count > 20:
                             break
                         time.sleep(0.05)
                         continue
@@ -726,10 +1601,10 @@ class CameraFeedWallOverlay:
                 time.sleep(2.0)
 
     def reload_if_needed(self, force=False):
-        now = time.monotonic()
-        if not force and (now - self.last_check < 2.0):
+        now_m = time.monotonic()
+        if not force and (now_m - self.last_check < 2.0):
             return
-        self.last_check = now
+        self.last_check = now_m
         if not os.path.exists(self.config_path):
             return
         try:
@@ -770,7 +1645,6 @@ class CameraFeedWallOverlay:
     def draw(self, frame_bgr, is_performer_framed=False, pos_override=None, opacity_override=None):
         if not self.enabled:
             return
-
         self.reload_if_needed()
 
         if opacity_override is not None:
@@ -788,7 +1662,6 @@ class CameraFeedWallOverlay:
 
         with self._lock:
             cam_frame = self.latest_frame.copy() if self.latest_frame is not None else None
-
         if cam_frame is None:
             return
 
@@ -833,7 +1706,10 @@ class CameraFeedWallOverlay:
 
 
 class DirectorStream:
-    """Stage Director AI framing stream with close-up tracking, pet rejection, and watchdog."""
+    """Stage Director AI framing stream with marathon resilience, auto-ducking show mixer & SSD clipper."""
+
+    SET_GRACE_SECONDS = 25.0
+    MIN_SET_SECONDS = 15.0
 
     def __init__(self, source, target, secrets, cfg, cam2_url=None, ip=None, token=None):
         self.ip = ip
@@ -847,9 +1723,30 @@ class DirectorStream:
         self.show_start_hour = int(cfg.get("show_start_hour", 21))
         self.show_end_hour = int(cfg.get("show_end_hour", 2))
         self.current_view_mode = desired_view(start_hour=self.show_start_hour, end_hour=self.show_end_hour)
+        self._current_policy = view_policy()
+        self._is_performer_framed = False
         self._last_view_check = 0.0
         self._ptz_slew_until = 0.0
         self._held_canvas = None
+
+        # Onstage set tracking for instant post-set clipping
+        self.clip_base = Path(cfg.get("clip_dir", str(DEFAULT_CLIP_BASE)))
+        self.ring_dir = self.clip_base / "ring"
+        self.sets_file = self.clip_base / "sets.jsonl"
+        self.enable_clip_buffer = bool(cfg.get("enable_clip_buffer", True))
+        self.clip_seg_seconds = int(cfg.get("clip_segment_seconds", 15))
+        self.clip_seg_wrap = int(cfg.get("clip_segment_wrap", 2880))  # 2880 * 15s = 12 hours rolling SSD history
+        if self.enable_clip_buffer:
+            try:
+                self.ring_dir.mkdir(parents=True, exist_ok=True)
+                (self.clip_base / "saved").mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                log(f"Clip ring buffer disabled (storage path error): {exc}")
+                self.enable_clip_buffer = False
+
+        self._active_set_start_epoch = None
+        self._active_set_last_seen_epoch = None
+
         self.stats = {
             'frame': 0,
             'fps': 0.0,
@@ -857,48 +1754,37 @@ class DirectorStream:
             'out_time': '00:00:00',
             'mode': 'director',
             'view': self.current_view_mode,
-            'view_policy': f"{view_policy()} ({self.show_start_hour:02d}:00-{self.show_end_hour:02d}:00 stage)",
+            'view_policy': f"{self._current_policy} ({self.show_start_hour:02d}:00-{self.show_end_hour:02d}:00 stage)",
+            'clip_buffer': str(self.ring_dir) if self.enable_clip_buffer else 'disabled',
+            'active_set_start_epoch': None,
         }
         self.errors = []
         self._stop_event = threading.Event()
 
-        # Token lifecycle & camera auto-reconnect
         self.token = token
         self.token_lock = threading.Lock()
         self.last_token_renew = time.monotonic()
-        self.last_valid_frame = None
-        self.reconnecting_camera = False
-        self._reconnect_lock = threading.Lock()
 
         self.out_w = cfg.get("output_width", 1280)
         self.out_h = cfg.get("output_height", 720)
-        # NVR subStream delivers 10 FPS; match input fps to prevent frame starvation and buffering
         self.fps = cfg.get("output_fps", 10.0)
         self.top_matte_h = cfg.get("top_matte_h", int(110 * (self.out_h / 720.0)))
-        refresh_hours = int(cfg.get("scheduled_refresh_hours", 3))
+        refresh_hours = effective_refresh_hours(cfg)
         self.ticker = TickerOverlay(config_path="/home/joseph1/box2-stream/ticker.json", top_h=self.top_matte_h, refresh_hours=refresh_hours)
         self.wall_overlay = WallOverlay(config_path="/home/joseph1/box2-stream/ticker.json", base_w=self.out_w, base_h=self.out_h)
 
-        # Parking lot center camera feed overlay with dynamic token getter
         cam2_getter = self.get_cam2_url if (self.ip and self.token) else cam2_url
         self.cam2_overlay = CameraFeedWallOverlay(cam2_getter, config_path="/home/joseph1/box2-stream/ticker.json", base_w=self.out_w, base_h=self.out_h) if (cam2_url or self.ip) else None
 
         initial_url = self.get_cam0_url() if (self.ip and self.token) else source
-        self.cap = cv2.VideoCapture(initial_url)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"DirectorStream: Failed to open video source {initial_url}")
-
-        ret, test_frame = self.cap.read()
-        if not ret or test_frame is None:
-            self.cap.release()
-            raise RuntimeError("DirectorStream: Failed to read initial frame from camera")
-
-        self.last_valid_frame = test_frame.copy()
+        self.cam_reader = PrimaryCameraReader(
+            initial_url=initial_url,
+            url_getter=(self.get_cam0_url if self.ip else (lambda: source)),
+            on_reconnect=(self._renew_nvr_token if self.ip else None),
+        )
+        test_frame, _ = self.cam_reader.get_frame()
         src_h, src_w = test_frame.shape[:2]
 
-        # Stage polygon & static wall-art exclusion:
-        # Covers the elevated T-stage surface, stool, rugs, doorway, and jukebox front (x=12..515, y=20..315 on 640x360),
-        # while strictly excluding the right offstage laundry wall / pipe / portrait poster (x >= 520).
         scale_x = src_w / 640.0
         scale_y = src_h / 360.0
         floor_cutoff_y = int(cfg.get("floor_cutoff_y_640", 315) * scale_y)
@@ -912,7 +1798,6 @@ class DirectorStream:
             (stage_left_x, floor_cutoff_y),
         ]
         self.stage_polygon = StagePolygon(vertices=stage_vertices)
-        # Explicit defense-in-depth exclusion zone over the right-wall portrait poster
         self.exclusion_boxes = [
             BoundingBox(
                 x=float(530 * scale_x),
@@ -973,25 +1858,48 @@ class DirectorStream:
         now_utc = datetime.now(timezone.utc)
         self.ensure_session(now_utc, time.monotonic())
 
+        # Start real-time local audio mixer (stage mic + auto-ducked show music -> local OS pipe)
+        self.audio_mixer = BroadcastAudioMixer(
+            cfg=cfg,
+            ip=self.ip,
+            cam0_url_getter=(self.get_cam0_url if self.ip else (lambda: source)),
+            view_getter=(lambda: self.current_view_mode),
+            policy_getter=(lambda: self._current_policy),
+            onstage_getter=(lambda: self._is_performer_framed),
+            secrets=secrets,
+        )
+
         bitrate = cfg.get("bitrate", "2500k")
+        if self.enable_clip_buffer:
+            tee_spec = (
+                f"[f=flv:flvflags=no_duration_filesize]{target}|"
+                f"[f=segment:onfail=ignore:segment_time={self.clip_seg_seconds}:"
+                f"segment_wrap={self.clip_seg_wrap}:reset_timestamps=1:bsfs/v=dump_extra]"
+                f"{self.ring_dir}/seg_%04d.ts"
+            )
+            output_args = ["-flags", "+global_header", "-f", "tee", tee_spec]
+        else:
+            output_args = ["-f", "flv", "-flvflags", "no_duration_filesize", target]
+
         self.proc = subprocess.Popen(
             [FFMPEG, '-hide_banner', '-loglevel', 'error', '-nostats', '-progress', 'pipe:1',
-             '-reconnect', '1', '-reconnect_at_eof', '1', '-reconnect_streamed', '1',
-             '-reconnect_on_network_error', '1', '-reconnect_delay_max', '2',
-             '-rw_timeout', '15000000',
-             '-i', initial_url,
+             '-thread_queue_size', '256', '-probesize', '32768', '-analyzeduration', '0',
              '-f', 'rawvideo', '-vcodec', 'rawvideo',
              '-s', f'{self.out_w}x{self.out_h}',
              '-pix_fmt', 'bgr24',
              '-r', str(int(self.fps)),
              '-i', 'pipe:0',
-             '-map', '1:v:0',
-             '-map', '0:a:0?',
+             '-thread_queue_size', '512', '-probesize', '32768', '-analyzeduration', '0',
+             '-f', 's16le', '-ar', '48000', '-ac', '2',
+             '-i', f'pipe:{self.audio_mixer.read_fd}',
+             '-map', '0:v:0',
+             '-map', '1:a:0',
              '-r', '30',
              '-c:v', 'libx264',
              '-preset', 'veryfast',
              '-tune', 'zerolatency',
              '-threads', '4',
+             '-g', '60', '-keyint_min', '60', '-sc_threshold', '0',
              '-b:v', bitrate,
              '-maxrate', bitrate,
              '-bufsize', '5000k',
@@ -1000,10 +1908,15 @@ class DirectorStream:
              '-b:a', '128k',
              '-ar', '48000',
              '-ac', '2',
-             '-f', 'flv',
-             '-flvflags', 'no_duration_filesize',
-             target],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+             *output_args],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            pass_fds=(self.audio_mixer.read_fd,), start_new_session=True)
+
+        # Parent closes its duplicate of read_fd now that FFmpeg child owns it
+        try:
+            os.close(self.audio_mixer.read_fd)
+        except OSError:
+            pass
 
         self.last_progress = time.monotonic()
         if self.ip and self.token:
@@ -1045,11 +1958,9 @@ class DirectorStream:
                 roi_bg * (1.0 - mask[:, :, None]) + vis.astype(np.float32) * mask[:, :, None]
             ).astype(np.uint8)
         else:
-            # Default fullbleed undistorted crop on Box 2 wall above jukebox (x=0..356, y=54..224 on 640x360)
             x1, y1, x2, y2 = 0, int(54 * sy), int(356 * sx), int(224 * sy)
             sub = src_frame[max(0, y1):min(self.src_h, y2), max(0, x1):min(self.src_w, x2)].copy()
             sw = sub.shape[1]
-            # Smooth dark vignette on left locker edge and right pipe edge (completely hides x>=320)
             r_start, r_zero = int(285 * sx), int(320 * sx)
             l_end = int(50 * sx)
             x_idx = np.arange(sw, dtype=np.float32)
@@ -1094,45 +2005,20 @@ class DirectorStream:
             return flv_url_ch(self.ip, token, 1, 'sub')
         return None
 
-    def _reconnect_camera(self):
+    def _renew_nvr_token(self):
         if not self.ip:
-            self.reconnecting_camera = False
             return
-        with self._reconnect_lock:
-            try:
-                log("Stage Director: Camera feed interrupted, renewing NVR session and reconnecting...")
-                new_token = nvr_login(self.ip, self.cfg)
-                with self.token_lock:
-                    old_token = self.token
-                    self.token = new_token
-                    self.last_token_renew = time.monotonic()
-                new_url = flv_url(self.ip, new_token, self.cfg)
-                new_cap = cv2.VideoCapture(new_url)
-                if new_cap.isOpened():
-                    ret, frame = new_cap.read()
-                    if ret and frame is not None:
-                        old_cap = self.cap
-                        self.cap = new_cap
-                        self.last_valid_frame = frame.copy()
-                        try:
-                            old_cap.release()
-                        except Exception:
-                            pass
-                        log("Stage Director: Camera connection recovered seamlessly (zero Twitch dropped frames)")
-                    else:
-                        new_cap.release()
-                if old_token:
-                    threading.Thread(target=nvr_logout, args=(self.ip, old_token), daemon=True).start()
-            except Exception as exc:
-                log(f"Stage Director camera reconnect warning: {scrub(str(exc), self.secrets)}")
-            finally:
-                self.reconnecting_camera = False
+        try:
+            new_token = nvr_login(self.ip, self.cfg)
+            with self.token_lock:
+                self.token = new_token
+                self.last_token_renew = time.monotonic()
+            log("Stage Director: renewed NVR session token for camera recovery")
+        except Exception as exc:
+            log(f"Stage Director token renewal warning: {scrub(str(exc), self.secrets)}")
 
     def _keepalive_worker(self):
-        """Active NVR session heartbeat and proactive token renewal.
-        1. Calls GetTime every 60s with current token to prevent NVR idle timeout.
-        2. Proactively renews token every 30m before 60m lease expires.
-        """
+        """Active NVR session heartbeat and proactive token renewal every 30m."""
         while not self._stop_event.is_set():
             time.sleep(60.0)
             if self._stop_event.is_set() or not self.ip:
@@ -1145,20 +2031,28 @@ class DirectorStream:
                 log(f"Stage Director keepalive warning: {scrub(str(exc), self.secrets)}")
 
             if time.monotonic() - self.last_token_renew > 1800.0:
-                try:
-                    new_token = nvr_login(self.ip, self.cfg)
-                    with self.token_lock:
-                        self.token = new_token
-                        self.last_token_renew = time.monotonic()
-                    log("Stage Director: proactively renewed NVR session token (lease extended)")
-                    # Do NOT forcibly Logout old_token immediately: active HTTP FLV readers
-                    # (cam2_overlay / ffmpeg audio) may still hold sockets opened under it;
-                    # letting old_token expire naturally avoids mid-stream reconnect blips.
-                except Exception as exc:
-                    log(f"Stage Director token renewal warning: {scrub(str(exc), self.secrets)}")
+                self._renew_nvr_token()
+
+    def _update_set_tracker(self, is_onstage, force_close=False):
+        now_ts = time.time()
+        if is_onstage and not force_close:
+            if self._active_set_start_epoch is None:
+                self._active_set_start_epoch = now_ts
+                log("Stage Director: performer onstage session started (auto-clip tracking active)")
+            self._active_set_last_seen_epoch = now_ts
+            self.stats["active_set_start_epoch"] = round(self._active_set_start_epoch, 2)
+        elif self._active_set_start_epoch is not None:
+            last_seen = self._active_set_last_seen_epoch or now_ts
+            if force_close or (now_ts - last_seen >= self.SET_GRACE_SECONDS):
+                dur = last_seen - self._active_set_start_epoch
+                if dur >= self.MIN_SET_SECONDS and self.enable_clip_buffer:
+                    entry = record_set_event(self.sets_file, self._active_set_start_epoch, last_seen, event_type="auto_set")
+                    log(f"Stage Director: logged {entry['duration_s']}s onstage set ({entry['start_local']} - {entry['end_local']})")
+                self._active_set_start_epoch = None
+                self._active_set_last_seen_epoch = None
+                self.stats["active_set_start_epoch"] = None
 
     def ensure_session(self, now_utc, cur_mono):
-        """Keep an active session going 24/7. Auto-renew if expired or within 1 hour of expiration."""
         if (self.session_expires is None or
             now_utc >= self.session_expires - timedelta(hours=1) or
             self.adapter.director.mode != Mode.LIVE):
@@ -1178,51 +2072,32 @@ class DirectorStream:
 
     def run_worker(self):
         frame_interval = 1.0 / max(1.0, float(self.fps))
-        consecutive_read_fails = 0
         proposal = None
 
         try:
             while not self._stop_event.is_set() and self.proc.poll() is None:
                 loop_start = time.monotonic()
-                ret = False
-                frame = None
-
-                if self.cap is not None and self.cap.isOpened() and not self.reconnecting_camera:
-                    try:
-                        ret, frame = self.cap.read()
-                    except Exception:
-                        ret = False
-                        frame = None
-
-                if ret and frame is not None:
-                    consecutive_read_fails = 0
-                    self.last_valid_frame = frame.copy()
-                else:
-                    consecutive_read_fails += 1
-                    # Frame starvation protection: feed last valid frame into FFmpeg
-                    if self.last_valid_frame is not None:
-                        frame = self.last_valid_frame.copy()
-                    else:
-                        frame = np.zeros((self.src_h, self.src_w, 3), dtype=np.uint8)
-
-                    # Trigger camera capture auto-reconnect if read fails for >= 10 frames (~1.0s)
-                    if consecutive_read_fails >= 10 and not self.reconnecting_camera:
-                        self.reconnecting_camera = True
-                        threading.Thread(target=self._reconnect_camera, daemon=True).start()
+                frame, is_fresh = self.cam_reader.get_frame()
+                if frame is None:
+                    frame = np.zeros((self.src_h, self.src_w, 3), dtype=np.uint8)
 
                 cur_mono = time.monotonic()
                 cur_utc = datetime.now(timezone.utc)
                 self.ensure_session(cur_utc, cur_mono)
 
-                # Poll desired view mode ('stage' vs 'privacy' Box 2 placeholder) every 0.5s without dropping stream
+                # Poll desired view mode & marathon/VOD cadence every 0.5s with zero stream drops
                 if cur_mono - self._last_view_check >= 0.5:
                     self._last_view_check = cur_mono
+                    self.ticker.set_refresh_hours(effective_refresh_hours(self.cfg))
+                    pol = view_policy()
+                    self._current_policy = pol
                     target_view = desired_view(start_hour=self.show_start_hour, end_hour=self.show_end_hour)
-                    self.stats['view_policy'] = f"{view_policy()} ({self.show_start_hour:02d}:00-{self.show_end_hour:02d}:00 stage)"
+                    self.stats['view_policy'] = f"{pol} ({self.show_start_hour:02d}:00-{self.show_end_hour:02d}:00 stage)"
                     if target_view != self.current_view_mode:
                         log(f"Stage Director view transition: {self.current_view_mode} -> {target_view}")
                         if target_view == "privacy":
-                            # Immediately mask room using Box 2 fallback before PTZ motor starts moving
+                            self._is_performer_framed = False
+                            self._update_set_tracker(False, force_close=True)
                             self._held_canvas = self._render_stage_box2_fallback(frame)
                             self._ptz_slew_until = cur_mono + 2.8
                             if self.ip:
@@ -1232,7 +2107,6 @@ class DirectorStream:
                                     daemon=True,
                                 ).start()
                         else:
-                            # Hold clean Box 2 privacy canvas while PTZ slews back to Stage Resting
                             self._held_canvas = self._render_privacy_canvas(frame)
                             self._ptz_slew_until = cur_mono + 2.8
                             self.adapter.framing.reset(monotonic_seconds=cur_mono)
@@ -1256,6 +2130,7 @@ class DirectorStream:
                             pop = float(p_cfg.get("cam2_opacity", 0.78))
                             self.cam2_overlay.draw(rendered, pos_override=(px, py), opacity_override=pop)
                 elif self.current_view_mode == "privacy":
+                    self._is_performer_framed = False
                     rendered = self._render_privacy_canvas(frame)
                     p_cfg = self.ticker.data.get("privacy_placeholder", {})
                     if self.cam2_overlay is not None and p_cfg.get("show_cam2_in_privacy", True):
@@ -1266,8 +2141,7 @@ class DirectorStream:
                 else:
                     candidate_boxes = []
                     onstage_count = 0
-                    if consecutive_read_fails == 0:
-                        # Face detection on native 640x360 (~48ms, 100% detection rate on human faces)
+                    if is_fresh:
                         if (self.src_w, self.src_h) == (640, 360):
                             det_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                             sx = 1.0
@@ -1297,9 +2171,6 @@ class DirectorStream:
                                 candidate_boxes.append(bbox)
                                 onstage_count += 1
 
-                        # Let PerformerTracker.update() enforce the multi-frame acquisition_confirm_frames
-                        # persistence gate for single performers; only resolve simultaneous multi-person
-                        # ambiguity once the primary candidate also satisfies persistence.
                         if self.adapter.tracker.state.value == "ambiguous" and candidate_boxes:
                             primary = max(candidate_boxes, key=lambda b: b.area)
                             if self.adapter.tracker._check_acquisition_persistence(primary, cur_mono):
@@ -1307,7 +2178,6 @@ class DirectorStream:
 
                         proposal = self.adapter.process_frame(candidate_boxes, cur_utc, cur_mono)
 
-                        # Log tracking state transitions
                         current_state = (proposal.tracking_state, proposal.camera_action)
                         if current_state != self._last_logged_state:
                             log(f"Stage Director state: {proposal.tracking_state}, action: {proposal.camera_action}, candidates: {onstage_count}")
@@ -1330,22 +2200,23 @@ class DirectorStream:
                     else:
                         rendered = cv2.resize(frame, (self.out_w, self.out_h), interpolation=cv2.INTER_AREA)
 
-                    # Subtle painted wall / parking lot camera overlay:
-                    # Stays steady on empty wide stage (ignoring unconfirmed 1-frame blips),
-                    # and stays smoothly faded to 0 throughout tracking, holding, and zoom-out transitions.
                     zoom_factor = (proposal.framing or {}).get("zoom_factor", 1.0)
                     is_performer_framed = (
                         proposal.tracking_state in ("tracking", "holding")
                         or zoom_factor > 1.05
                     )
+                    self._is_performer_framed = is_performer_framed
+                    self._update_set_tracker(is_performer_framed)
+
                     if self.cam2_overlay is not None and self.cam2_overlay.enabled:
                         self.cam2_overlay.draw(rendered, is_performer_framed=is_performer_framed)
                     else:
                         self.wall_overlay.draw(rendered, is_performer_framed=is_performer_framed)
 
-                # Draw top broadcast banner with live moving timestamp & scrolling ticker tape
                 if self.top_matte_h > 0:
                     self.ticker.draw(rendered, standby_mode=(self.current_view_mode == "privacy"))
+
+                self.stats.update(self.audio_mixer.stats)
 
                 try:
                     self.proc.stdin.write(rendered.tobytes())
@@ -1354,16 +2225,14 @@ class DirectorStream:
                 except (BrokenPipeError, OSError, ValueError):
                     break
 
-                # Frame pacing: maintain exact 10 FPS cadence
                 elapsed = time.monotonic() - loop_start
                 sleep_needed = frame_interval - elapsed
                 if sleep_needed > 0.002:
                     time.sleep(sleep_needed)
         finally:
-            try:
-                self.cap.release()
-            except Exception:
-                pass
+            self._update_set_tracker(False, force_close=True)
+            self.cam_reader.stop()
+            self.audio_mixer.stop()
             try:
                 self.proc.stdin.close()
             except Exception:
@@ -1410,6 +2279,8 @@ class DirectorStream:
 
     def stop(self):
         self._stop_event.set()
+        self.cam_reader.stop()
+        self.audio_mixer.stop()
         if self.proc.poll() is None:
             os.killpg(self.proc.pid, signal.SIGTERM)
             try:
@@ -1426,7 +2297,6 @@ class DirectorStream:
 def run():
     cfg = json.loads(CONFIG.read_text())
     secrets = [cfg['nvr_password'], cfg['twitch_key']]
-    refresh_hours = int(cfg.get('scheduled_refresh_hours', 3))
     status = {'state': 'starting', 'since': now(), 'restarts': 0, 'nvr_ip': None, 'last_error': None}
     backoff = 3
     stop = threading.Event()
@@ -1448,7 +2318,6 @@ def run():
             status['nvr_ip'] = ip
             token = nvr_login(ip, cfg)
 
-            # Choose streaming mode: director (default) or passthrough
             stream_mode = cfg.get('stream_mode', 'director')
             if stream_mode == 'director' and STAGE_DIRECTOR_AVAILABLE:
                 log(f"streaming (Stage Director {'live' if mode == 'on' else 'Twitch bandwidth test'}) from NVR at {ip}")
@@ -1463,9 +2332,9 @@ def run():
                 if stream.stalled():
                     raise RuntimeError(f'no new video for {STALL_SECONDS} s; restarting')
                 if time.monotonic() - stream.started > 60:
-                    backoff = 3  # a minute of good streaming resets the back-off
+                    backoff = 3
 
-                # Scheduled 3-hour VOD refresh at the top of the hour for clean clipping blocks
+                refresh_hours = effective_refresh_hours(cfg)
                 now_dt = datetime.now()
                 if (
                     refresh_hours > 0
@@ -1480,10 +2349,11 @@ def run():
                     break
 
                 next_ref = next_scheduled_refresh_time(refresh_hours)
-                next_ref_str = next_ref.strftime('%Y-%m-%d %I:%M:%S %p') if next_ref else 'disabled'
+                next_ref_str = next_ref.strftime('%Y-%m-%d %I:%M:%S %p') if next_ref else 'marathon (uninterrupted)'
                 write_json(STATUS, {
                     **status,
                     **stream.stats,
+                    'stream_cadence': 'marathon' if refresh_hours <= 0 else f'vod-{refresh_hours}h',
                     'next_scheduled_refresh': next_ref_str,
                     'updated': now(),
                 })
@@ -1492,7 +2362,6 @@ def run():
             if scheduled_rollover:
                 stream.stop()
                 status.update(last_error=None)
-                # Wait 7 seconds for Twitch ingest to close and archive the 3-hour VOD
                 stop.wait(7)
                 continue
 
@@ -1501,7 +2370,7 @@ def run():
         except Exception as exc:
             status.update(state='recovering', last_error=scrub(str(exc), secrets + ([token] if token else [])),
                           restarts=status['restarts'] + 1)
-            wait_s = max(backoff, 6)  # Give Twitch ingest proxy at least 6s to clear previous socket
+            wait_s = max(backoff, 6)
             log(f"problem: {status['last_error']} (retrying in {wait_s} s)")
             write_json(STATUS, {**status, 'updated': now()})
             stop.wait(wait_s)
@@ -1514,29 +2383,133 @@ def run():
     write_json(STATUS, {**status, 'state': 'stopped', 'updated': now()})
 
 
+def _handle_music_cli(args):
+    st = read_state()
+    m_cfg = dict(st.get('music', {})) if isinstance(st.get('music'), dict) else {}
+    sub = args[0].lower() if args else 'status'
+
+    if sub in ('on', 'play', 'start'):
+        m_cfg['mode'] = 'on'
+        update_state(music=m_cfg)
+        print(f"Music ON (playing from {DEFAULT_MUSIC_DIR} with automatic voice & stage ducking).")
+    elif sub in ('off', 'stop', 'mute'):
+        m_cfg['mode'] = 'off'
+        update_state(music=m_cfg)
+        print("Music OFF (smooth fade out; stage mic stays live).")
+    elif sub == 'auto':
+        m_cfg['mode'] = 'auto'
+        update_state(music=m_cfg)
+        print("Music AUTO (plays during 9PM-2AM stage / showtime with auto-ducking; quiet during privacy & rehearsal).")
+    elif sub in ('next', 'skip'):
+        m_cfg['skip_seq'] = int(m_cfg.get('skip_seq', 0)) + 1
+        update_state(music=m_cfg)
+        print("Skipping to next track in playlist.")
+    elif sub in ('bed', 'walkup'):
+        m_cfg['onstage_mode'] = sub
+        update_state(music=m_cfg)
+        desc = (
+            "subtle background bed during onstage sets (never swells during pauses)"
+            if sub == 'bed'
+            else "8-second walk-up intro when taking stage, then fades to 0.0 for dry set"
+        )
+        print(f"Onstage music mix mode set to '{sub}': {desc}.")
+    elif sub in ('vol', 'volume') and len(args) >= 2:
+        vol = max(0.0, min(1.0, float(args[1])))
+        m_cfg['idle_volume'] = vol
+        update_state(music=m_cfg)
+        print(f"Idle music volume set to {vol:.2f} (auto-ducks when speaking/onstage).")
+    else:
+        tracks = sorted([p.name for p in DEFAULT_MUSIC_DIR.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXTS]) if DEFAULT_MUSIC_DIR.exists() else []
+        print(json.dumps({
+            "music_state": m_cfg,
+            "music_dir": str(DEFAULT_MUSIC_DIR),
+            "tracks_available": tracks,
+        }, indent=2))
+
+
+def _handle_clips_list():
+    sets_file = DEFAULT_CLIP_BASE / "sets.jsonl"
+    saved_dir = DEFAULT_CLIP_BASE / "saved"
+    ring_dir = DEFAULT_CLIP_BASE / "ring"
+    recent_sets = load_recent_sets(sets_file, limit=10)
+    saved = []
+    if saved_dir.exists():
+        for p in sorted(saved_dir.glob("*.mp4"))[-15:]:
+            st = p.stat()
+            saved.append({
+                "file": str(p),
+                "size_mb": round(st.st_size / (1024 * 1024), 2),
+                "created": datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %I:%M:%S %p'),
+            })
+    ring_count = len(list(ring_dir.glob("seg_*.ts"))) if ring_dir.exists() else 0
+    print(json.dumps({
+        "ring_buffer_segments": ring_count,
+        "approx_ring_history_minutes": round(ring_count * 15.0 / 60.0, 1),
+        "recent_onstage_sets": recent_sets,
+        "saved_clips": saved,
+    }, indent=2))
+
+
 def main():
     command = sys.argv[1] if len(sys.argv) > 1 else 'status'
+    cur_desired = desired()
+    live_desired = cur_desired if cur_desired in ('on', 'test') else 'on'
+
     if command in ('on', 'test', 'off'):
-        write_json(STATE, {'desired': command, 'view': 'auto', 'set': now()})
-        print({'on': 'Going live (auto schedule: privacy until 9PM, Stage Director 9PM-2AM): streaming to Twitch.',
+        update_state(desired=command, view='auto', view_until=None)
+        print({'on': 'Going live (uninterrupted marathon + 9PM-2AM stage schedule): streaming to Twitch.',
                'test': 'Twitch bandwidth test: the Orin streams to Twitch without going live.',
                'off': 'Stream off.'}[command])
-    elif command == 'auto':
-        cur_desired = desired()
-        target_desired = cur_desired if cur_desired in ('on', 'test') else 'on'
-        write_json(STATE, {'desired': target_desired, 'view': 'auto', 'set': now()})
+    elif command in ('auto', 'done'):
+        update_state(desired=live_desired, view='auto', view_until=None)
         cur_v = desired_view()
         print(f'Auto schedule ON (Stage Director 9:00 PM - 2:00 AM EST, Privacy Standby 2:00 AM - 9:00 PM EST). Current active view: {cur_v}.')
     elif command in ('privacy', 'standby', 'brb'):
-        cur_desired = desired()
-        target_desired = cur_desired if cur_desired in ('on', 'test') else 'on'
-        write_json(STATE, {'desired': target_desired, 'view': 'privacy', 'set': now()})
-        print('Manual override: Privacy placeholder ON (Box 2 wall sign + bottom-left parking lot). Run "box2_stream.py auto" to resume 9PM-2AM schedule.')
+        update_state(desired=live_desired, view='privacy', view_until=None)
+        print('Manual override: Privacy placeholder ON (Box 2 wall sign + bottom-left parking lot). Run "box2-stream auto" to resume 9PM-2AM schedule.')
     elif command == 'stage':
-        cur_desired = desired()
-        target_desired = cur_desired if cur_desired in ('on', 'test') else 'on'
-        write_json(STATE, {'desired': target_desired, 'view': 'stage', 'set': now()})
-        print('Manual override: Stage view ON (Preset 16 + Stage Director). Run "box2_stream.py auto" to resume 9PM-2AM schedule.')
+        update_state(desired=live_desired, view='stage', view_until=None)
+        print('Manual override: Stage view ON (Preset 16 + Stage Director). Run "box2-stream auto" to resume 9PM-2AM schedule.')
+    elif command == 'rehearse':
+        mins = float(sys.argv[2]) if len(sys.argv) > 2 else 120.0
+        until_ts = time.time() + max(5.0, mins * 60.0)
+        until_str = datetime.fromtimestamp(until_ts).strftime('%I:%M %p').lstrip('0')
+        update_state(desired=live_desired, view='rehearse', view_until=until_ts, manual_set_start_epoch=time.time())
+        print(f'Rehearsal mode ON: Camera switched to Stage Active (Preset 16 + Stage Director, background music quiet) until {until_str} — zero stream drop! Run "box2-stream clip" after a run-through or "box2-stream done" when finished.')
+    elif command == 'showtime':
+        st = read_state()
+        m_cfg = dict(st.get('music', {})) if isinstance(st.get('music'), dict) else {}
+        if m_cfg.get('mode') == 'off':
+            m_cfg['mode'] = 'auto'
+        update_state(desired=live_desired, view='stage', view_until=None, music=m_cfg)
+        print('SHOWTIME ON: Stage camera active + warm-up music playing with smart auto-ducking whenever you take the stage or speak into the mic!')
+    elif command == 'marathon':
+        update_state(cadence='marathon')
+        print('Marathon mode ON: Uninterrupted continuous stream (3-hour VOD drops disabled; 12-hour SSD rolling clip buffer active).')
+    elif command in ('vod', 'vod-mode'):
+        update_state(cadence='vod')
+        print('VOD mode ON: Stream will briefly refresh every 3 hours at the top of the hour for Twitch VOD archiving.')
+    elif command == 'music':
+        _handle_music_cli(sys.argv[2:])
+    elif command == 'mark-set':
+        update_state(manual_set_start_epoch=time.time())
+        print(f'Set start marker recorded at {now()}. Run "box2-stream clip [label]" right after your set!')
+    elif command == 'clip':
+        arg1 = sys.argv[2] if len(sys.argv) > 2 else None
+        arg2 = sys.argv[3] if len(sys.argv) > 3 else None
+        # Allow `box2-stream clip my_set_name` (single non-duration label) -> clips --last-set with label!
+        if arg1 and arg2 is None and arg1 not in ('--last-set', 'last-set', 'set'):
+            try:
+                parse_duration_seconds(arg1)
+                dur_arg, lbl_arg = arg1, None
+            except ValueError:
+                dur_arg, lbl_arg = '--last-set', arg1
+        else:
+            dur_arg, lbl_arg = arg1, arg2
+        info = extract_clip(duration_or_mode=dur_arg, label=lbl_arg)
+        print(json.dumps(info, indent=2))
+    elif command == 'clips':
+        _handle_clips_list()
     elif command == 'status':
         try:
             print(STATUS.read_text())

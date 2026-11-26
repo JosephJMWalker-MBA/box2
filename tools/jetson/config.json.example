@@ -7,7 +7,8 @@
   "nvr_stream": "sub",
   "twitch_server": "rtmp://live.twitch.tv/app",
   "twitch_key": "live_XXXXXXXXX_YOUR_TWITCH_STREAM_KEY",
-  "scheduled_refresh_hours": 3,
+  "scheduled_refresh_hours": 0,
+  "vod_refresh_hours": 3,
   "output_width": 1280,
   "output_height": 720,
   "output_fps": 10.0,
@@ -22,5 +23,16 @@
   "stage_resting_preset_id": 16,
   "privacy_preset_id": 17,
   "show_start_hour": 21,
-  "show_end_hour": 2
+  "show_end_hour": 2,
+  "enable_clip_buffer": true,
+  "clip_dir": "/mnt/ssd/box2-clips",
+  "clip_segment_seconds": 15,
+  "clip_segment_wrap": 2880,
+  "music_dir": "/mnt/ssd/media/box2-music",
+  "mic_gain": 1.85,
+  "voice_threshold_dbfs": -35.0,
+  "music_idle_volume": 0.34,
+  "music_ducked_volume": 0.05,
+  "music_onstage_volume": 0.06,
+  "music_onstage_mode": "bed"
 }
