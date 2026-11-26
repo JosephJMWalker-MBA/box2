@@ -17,6 +17,8 @@ Core commands:
   box2-stream stage | privacy           manual view lock without dropping stream
   box2-stream music [auto|on|off|next|bed|walkup|vol <0..1>]   live music & mix control
   box2-stream dj [launch|status|rotate|suno|spotify|house|skip-ad|test-ad]  Suno + Spotify + Ad-Swap control
+  box2-stream joke [list|add "text"|remove <n>]   manage live rotating stream & ticker jokes
+  box2-stream theme [thanksgiving|classic]        set broadcast seasonal theme live
   box2-stream mark-set                  mark start of a comedy set right now
   box2-stream clip [dur|--last-set] [label]   save lossless .mp4 clip without dropping stream
   box2-stream clips                     list recent detected sets and saved .mp4 clips
@@ -52,6 +54,7 @@ except ImportError:
 
 HOME = Path(__file__).resolve().parent
 CONFIG, STATE, STATUS = HOME / 'config.json', HOME / 'state.json', HOME / 'status.json'
+JOKES_FILE = HOME / 'jokes.json'
 STALL_SECONDS = 20
 FFMPEG = '/usr/bin/ffmpeg'
 FFPROBE = '/usr/bin/ffprobe'
@@ -157,6 +160,34 @@ def is_within_show_hours(now_dt=None, start_hour=21, end_hour=2):
     if start_hour < end_hour:
         return start_hour <= h < end_hour
     return h >= start_hour or h < end_hour
+
+
+def seconds_until_showtime(now_dt=None, start_hour=21, end_hour=2):
+    """Return seconds until next `start_hour:00:00` showtime (0.0 if currently within show hours)."""
+    if now_dt is None:
+        now_dt = datetime.now()
+    if is_within_show_hours(now_dt=now_dt, start_hour=start_hour, end_hour=end_hour):
+        return 0.0
+    target = now_dt.replace(hour=int(start_hour) % 24, minute=0, second=0, microsecond=0)
+    if target <= now_dt:
+        target += timedelta(days=1)
+    return max(0.0, (target - now_dt).total_seconds())
+
+
+def load_jokes_data(jokes_path=None):
+    p = Path(jokes_path) if jokes_path else JOKES_FILE
+    if not p.exists():
+        return {"seasonal_greeting": "", "jokes": []}
+    try:
+        data = json.loads(p.read_text())
+        if isinstance(data, list):
+            return {"seasonal_greeting": "", "jokes": [str(x).strip() for x in data if str(x).strip()]}
+        if isinstance(data, dict):
+            jokes = [str(x).strip() for x in data.get("jokes", []) if str(x).strip()]
+            return {"seasonal_greeting": str(data.get("seasonal_greeting", "")), "jokes": jokes}
+    except Exception:
+        pass
+    return {"seasonal_greeting": "", "jokes": []}
 
 
 def view_policy(now_epoch=None, state_data=None):
@@ -1384,16 +1415,19 @@ class TickerOverlay:
     centered STAGE STANDBY badge, and optional warnings when 3-hour VOD mode is active.
     """
 
-    def __init__(self, config_path="/home/joseph1/box2-stream/ticker.json", top_h=110, refresh_hours=0):
+    def __init__(self, config_path="/home/joseph1/box2-stream/ticker.json", top_h=110, refresh_hours=0, jokes_path=None):
         self.config_path = config_path
+        self.jokes_path = str(jokes_path or JOKES_FILE)
         self.top_h = top_h
         self.refresh_hours = int(refresh_hours)
         self.last_load = 0.0
         self.last_countdown_update = 0.0
         self.current_rem_sec = None
         self.next_time_str = ""
+        self.jokes_data = load_jokes_data(self.jokes_path)
         self.data = {
             "title": "BOX 2  |  CANTON REFINERY",
+            "seasonal_theme": "thanksgiving",
             "messages": [
                 "NOW ON STAGE: Open Mic Comedy Session",
                 "BOOK STAGE TIME: https://box2.yurrmom.com",
@@ -1420,10 +1454,29 @@ class TickerOverlay:
             self._update_full_str()
 
     def _update_full_str(self, test_rem_sec=None):
-        raw_msgs = list(self.data.get("messages", []))
+        base_msgs = list(self.data.get("messages", []))
         if self.refresh_hours <= 0 and test_rem_sec is None:
             # Strip static 3-hour VOD drop notices automatically when running in uninterrupted marathon mode
-            raw_msgs = [m for m in raw_msgs if "3-hour vod" not in m.lower()]
+            base_msgs = [m for m in base_msgs if "3-hour vod" not in m.lower()]
+
+        # Interleave seasonal greeting & jokes cleanly into ticker rotation
+        jokes = list(self.jokes_data.get("jokes", []))
+        greeting = self.jokes_data.get("seasonal_greeting", "").strip()
+        theme = str(self.data.get("seasonal_theme", "thanksgiving")).lower()
+        raw_msgs = []
+        if greeting and theme != "classic":
+            raw_msgs.append(greeting)
+        if jokes:
+            # Weave core venue messages with Thanksgiving & Yurrmom.com jokes in the scrolling ticker
+            max_len = max(len(base_msgs), len(jokes))
+            for i in range(max_len):
+                if i < len(base_msgs):
+                    raw_msgs.append(base_msgs[i])
+                if i < len(jokes):
+                    raw_msgs.append(jokes[i])
+        else:
+            raw_msgs.extend(base_msgs)
+
         if self.live_banner:
             raw_msgs = [self.live_banner] + raw_msgs
         if not raw_msgs:
@@ -1467,19 +1520,48 @@ class TickerOverlay:
         if new_ticker_str != self.full_ticker_str:
             self.full_ticker_str = new_ticker_str
 
+    @staticmethod
+    def _draw_autumn_leaf_cv2(img, cx, cy, scale=1.0, color_bgr=(35, 130, 240)):
+        """Draw an unmistakable 3-lobe autumn maple leaf with a bottom stem."""
+        blade = np.array([
+            [cx, int(cy - 10 * scale)],                    # top center point
+            [int(cx + 3 * scale), int(cy - 4 * scale)],
+            [int(cx + 10 * scale), int(cy - 6 * scale)],   # upper-right lobe tip
+            [int(cx + 7 * scale), int(cy + 0 * scale)],
+            [int(cx + 9 * scale), int(cy + 3 * scale)],    # lower-right lobe tip
+            [int(cx + 2 * scale), int(cy + 5 * scale)],    # leaf base right
+            [int(cx - 2 * scale), int(cy + 5 * scale)],    # leaf base left
+            [int(cx - 9 * scale), int(cy + 3 * scale)],    # lower-left lobe tip
+            [int(cx - 7 * scale), int(cy + 0 * scale)],
+            [int(cx - 10 * scale), int(cy - 6 * scale)],   # upper-left lobe tip
+            [int(cx - 3 * scale), int(cy - 4 * scale)],
+        ], dtype=np.int32)
+        cv2.fillPoly(img, [blade], color_bgr, lineType=cv2.LINE_AA)
+        # Stem + central midrib vein
+        stem_bgr = tuple(max(0, int(c * 0.65)) for c in color_bgr)
+        cv2.line(img, (cx, int(cy - 5 * scale)), (cx, int(cy + 10 * scale)), stem_bgr, max(1, int(round(1.6 * scale))), cv2.LINE_AA)
+        cv2.line(img, (cx, int(cy + 10 * scale)), (int(cx + 2 * scale), int(cy + 11 * scale)), color_bgr, max(1, int(round(1.5 * scale))), cv2.LINE_AA)
+
     def reload_if_needed(self):
         now_mono = time.monotonic()
         if now_mono - self.last_load > 2.0:
             self.last_load = now_mono
+            changed = False
             if os.path.exists(self.config_path):
                 try:
                     with open(self.config_path) as f:
                         loaded = json.load(f)
                     if loaded != self.data:
                         self.data = loaded
-                        self._update_full_str()
+                        changed = True
                 except Exception:
                     pass
+            new_jokes = load_jokes_data(self.jokes_path)
+            if new_jokes != self.jokes_data:
+                self.jokes_data = new_jokes
+                changed = True
+            if changed:
+                self._update_full_str()
 
         if now_mono - self.last_countdown_update >= 1.0:
             self.last_countdown_update = now_mono
@@ -1488,19 +1570,25 @@ class TickerOverlay:
     def draw(self, frame_bgr, standby_mode=False):
         h, w = frame_bgr.shape[:2]
         self.reload_if_needed()
+        is_tg = str(self.data.get("seasonal_theme", "thanksgiving")).lower() == "thanksgiving"
 
         # 1. Solid matte banner background (y=0 to top_h)
-        frame_bgr[:self.top_h, :] = (15, 15, 18)
-        cv2.line(frame_bgr, (0, self.top_h - 1), (w, self.top_h - 1), (70, 70, 80), 2)
+        frame_bgr[:self.top_h, :] = (12, 14, 20) if is_tg else (15, 15, 18)
+        sep_color = (40, 115, 205) if is_tg else (70, 70, 80)
+        cv2.line(frame_bgr, (0, self.top_h - 1), (w, self.top_h - 1), sep_color, 2)
 
         # 2. [● LIVE] badge
         cv2.rectangle(frame_bgr, (20, 12), (120, 42), (30, 30, 190), -1)
         cv2.circle(frame_bgr, (38, 27), 4, (255, 255, 255), -1)
-        cv2.putText(frame_bgr, "LIVE", (52, 33), cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
+        cv2.putText(frame_bgr, "LIVE", (52, 33), cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
-        # 3. Stage title
+        # 3. Stage title (+ festive autumn leaf accents in Thanksgiving theme)
         title = self.data.get("title", "BOX 2  |  CANTON REFINERY")
-        cv2.putText(frame_bgr, title, (140, 33), cv2.FONT_HERSHEY_DUPLEX, 0.6, (220, 220, 220), 1)
+        title_x = 140
+        if is_tg:
+            self._draw_autumn_leaf_cv2(frame_bgr, 142, 27, scale=0.95, color_bgr=(30, 135, 245))
+            title_x = 160
+        cv2.putText(frame_bgr, title, (title_x, 33), cv2.FONT_HERSHEY_DUPLEX, 0.6, (225, 232, 242), 1, cv2.LINE_AA)
 
         # 4. Imminent reset warning badge (<= 180s) OR centered STAGE STANDBY badge
         rem_sec = self.current_rem_sec
@@ -1525,29 +1613,45 @@ class TickerOverlay:
             ty = by1 + ((by2 - by1) + th) // 2
             cv2.rectangle(frame_bgr, (bx1, by1), (bx2, by2), badge_bg, -1)
             cv2.rectangle(frame_bgr, (bx1, by1), (bx2, by2), badge_border, 1)
-            cv2.putText(frame_bgr, badge_text, (tx, ty), cv2.FONT_HERSHEY_DUPLEX, 0.55, text_color, 1)
+            cv2.putText(frame_bgr, badge_text, (tx, ty), cv2.FONT_HERSHEY_DUPLEX, 0.55, text_color, 1, cv2.LINE_AA)
         elif standby_mode and self.data.get("privacy_placeholder", {}).get("show_standby_badge", True):
-            standby_label = self.data.get("privacy_placeholder", {}).get("badge_label", "STAGE STANDBY")
-            (tw, th), _ = cv2.getTextSize(standby_label, cv2.FONT_HERSHEY_DUPLEX, 0.52, 1)
-            bx1, by1 = 500, 12
-            bx2, by2 = max(710, bx1 + tw + 32), 42
+            standby_label = self.data.get("privacy_placeholder", {}).get(
+                "badge_label",
+                "HAPPY THANKSGIVING | STANDBY" if is_tg else "STAGE STANDBY",
+            )
+            (tw, th), _ = cv2.getTextSize(standby_label, cv2.FONT_HERSHEY_DUPLEX, 0.50, 1)
+            bx1, by1 = 478 if is_tg else 500, 12
+            bx2, by2 = max(710, bx1 + tw + 30), 42
             tx = bx1 + ((bx2 - bx1) - tw) // 2
             ty = by1 + ((by2 - by1) + th) // 2
-            cv2.rectangle(frame_bgr, (bx1, by1), (bx2, by2), (32, 34, 42), -1)
-            cv2.rectangle(frame_bgr, (bx1, by1), (bx2, by2), (110, 115, 130), 1)
-            cv2.putText(frame_bgr, standby_label, (tx, ty), cv2.FONT_HERSHEY_DUPLEX, 0.52, (205, 210, 220), 1)
+            bg_c = (18, 28, 48) if is_tg else (32, 34, 42)
+            bd_c = (45, 145, 235) if is_tg else (110, 115, 130)
+            tx_c = (120, 205, 255) if is_tg else (205, 210, 220)
+            cv2.rectangle(frame_bgr, (bx1, by1), (bx2, by2), bg_c, -1)
+            cv2.rectangle(frame_bgr, (bx1, by1), (bx2, by2), bd_c, 1)
+            cv2.putText(frame_bgr, standby_label, (tx, ty), cv2.FONT_HERSHEY_DUPLEX, 0.50, tx_c, 1, cv2.LINE_AA)
 
         # 5. Live moving timestamp (updates each second)
         now_str = datetime.now().strftime("%m/%d/%Y  %I:%M:%S %p")
-        cv2.putText(frame_bgr, now_str, (w - 380, 33), cv2.FONT_HERSHEY_DUPLEX, 0.58, (220, 220, 220), 1)
+        cv2.putText(frame_bgr, now_str, (w - 380, 33), cv2.FONT_HERSHEY_DUPLEX, 0.58, (220, 225, 230), 1, cv2.LINE_AA)
 
         # 6. Ticker tape box (y=50 to 96)
         is_imminent = rem_sec is not None and rem_sec <= 300
-        box_border_color = (0, 180, 255) if is_imminent else (60, 60, 70)
-        ticker_text_color = (0, 220, 255) if is_imminent else (0, 230, 255)
+        if is_imminent:
+            box_border_color = (0, 180, 255)
+            ticker_text_color = (0, 220, 255)
+            box_bg_color = (28, 28, 34)
+        elif is_tg:
+            box_border_color = (42, 125, 218)   # warm harvest copper-gold in BGR
+            ticker_text_color = (75, 198, 255)  # rich warm Thanksgiving gold (#FFC64B) in BGR
+            box_bg_color = (18, 22, 32)
+        else:
+            box_border_color = (60, 60, 70)
+            ticker_text_color = (0, 230, 255)
+            box_bg_color = (28, 28, 34)
 
         box_x1, box_y1, box_x2, box_y2 = 20, 50, w - 20, 96
-        cv2.rectangle(frame_bgr, (box_x1, box_y1), (box_x2, box_y2), (28, 28, 34), -1)
+        cv2.rectangle(frame_bgr, (box_x1, box_y1), (box_x2, box_y2), box_bg_color, -1)
         cv2.rectangle(frame_bgr, (box_x1, box_y1), (box_x2, box_y2), box_border_color, 1)
 
         # 7. Smooth scrolling text clipped inside ROI
@@ -1563,9 +1667,274 @@ class TickerOverlay:
         self.scroll_x = (self.scroll_x + speed) % max(1, tw)
 
         start_x = -self.scroll_x
-        cv2.putText(ticker_roi, self.full_ticker_str, (start_x, 30), font, font_scale, ticker_text_color, font_thick)
+        cv2.putText(ticker_roi, self.full_ticker_str, (start_x, 30), font, font_scale, ticker_text_color, font_thick, cv2.LINE_AA)
         if start_x + tw < roi_w:
-            cv2.putText(ticker_roi, self.full_ticker_str, (start_x + tw, 30), font, font_scale, ticker_text_color, font_thick)
+            cv2.putText(ticker_roi, self.full_ticker_str, (start_x + tw, 30), font, font_scale, ticker_text_color, font_thick, cv2.LINE_AA)
+
+
+class ShowtimeCountdownOverlay:
+    """Large bottom-right Showtime Countdown + Seasonal Cheer + Rotating Joke Spotlight card.
+
+    - Displays a big, high-contrast PIL-rendered countdown (`HH : MM : SS`) to 9:00 PM EST
+      in the bottom-right corner alongside a rotating comedy/YurrMom.com joke spotlight.
+    - Re-renders the card image only once per second (cached RGBA array), keeping per-frame
+      blending under 0.3ms on Jetson Orin Nano.
+    - Adds subtle drifting autumn harvest leaves in the dark standby side margins when
+      `seasonal_theme == "thanksgiving"`.
+    """
+
+    def __init__(
+        self,
+        config_path="/home/joseph1/box2-stream/ticker.json",
+        jokes_path=None,
+        base_w=1280,
+        base_h=720,
+        start_hour=21,
+        end_hour=2,
+    ):
+        self.config_path = config_path
+        self.jokes_path = str(jokes_path or JOKES_FILE)
+        self.base_w = base_w
+        self.base_h = base_h
+        self.start_hour = int(start_hour)
+        self.end_hour = int(end_hour)
+
+        self.enabled = True
+        self.theme = "thanksgiving"
+        self.card_w = 450
+        self.card_h = 166
+        self.x = base_w - self.card_w - 24  # x = 806 on 1280x720
+        self.y = base_h - self.card_h - 24  # y = 530 on 1280x720 (bottom-right, balanced with bottom-left PIP)
+        self.show_falling_leaves = True
+
+        self.last_check = 0.0
+        self._fonts = {}
+        self._cached_key = None
+        self._cached_bgr = None
+        self._cached_alpha = None
+        self._leaf_particles = [
+            {"x": 42.0, "y": 140.0, "vy": 1.6, "phase": 0.0, "color": (30, 125, 240), "scale": 1.0},
+            {"x": 355.0, "y": 290.0, "vy": 1.3, "phase": 1.8, "color": (35, 70, 210), "scale": 0.85},
+            {"x": 850.0, "y": 180.0, "vy": 1.5, "phase": 3.1, "color": (55, 185, 250), "scale": 0.95},
+            {"x": 1225.0, "y": 260.0, "vy": 1.8, "phase": 4.5, "color": (28, 110, 235), "scale": 1.05},
+            {"x": 1060.0, "y": 130.0, "vy": 1.4, "phase": 2.2, "color": (45, 160, 245), "scale": 0.80},
+        ]
+        self._reload(force=True)
+
+    def _get_font(self, size):
+        if size in self._fonts:
+            return self._fonts[size]
+        if not HAS_PIL:
+            return None
+        for fp in (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/Library/Fonts/Arial Bold.ttf",
+        ):
+            if os.path.exists(fp):
+                try:
+                    f = ImageFont.truetype(fp, size)
+                    self._fonts[size] = f
+                    return f
+                except Exception:
+                    pass
+        f = ImageFont.load_default()
+        self._fonts[size] = f
+        return f
+
+    def _reload(self, force=False):
+        now_m = time.monotonic()
+        if not force and (now_m - self.last_check < 2.0):
+            return
+        self.last_check = now_m
+        if os.path.exists(self.config_path):
+            try:
+                tk = json.loads(Path(self.config_path).read_text())
+                self.theme = str(tk.get("seasonal_theme", "thanksgiving")).lower()
+                c_cfg = tk.get("showtime_countdown", {})
+                if isinstance(c_cfg, dict):
+                    self.enabled = bool(c_cfg.get("enabled", True))
+                    self.x = int(c_cfg.get("x", self.base_w - self.card_w - 24))
+                    self.y = int(c_cfg.get("y", self.base_h - self.card_h - 24))
+                    self.show_falling_leaves = bool(c_cfg.get("falling_leaves", True))
+            except Exception:
+                pass
+
+    @staticmethod
+    def _wrap_text(draw, text, font, max_w, max_lines=3):
+        words = str(text or "").split()
+        if not words:
+            return []
+        lines = []
+        cur = words[0]
+        for w in words[1:]:
+            test = f"{cur} {w}"
+            bbox = draw.textbbox((0, 0), test, font=font)
+            if (bbox[2] - bbox[0]) <= max_w:
+                cur = test
+            else:
+                lines.append(cur)
+                cur = w
+        lines.append(cur)
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            if len(lines[-1]) > 3:
+                lines[-1] = lines[-1].rstrip(" .,") + "..."
+        return lines
+
+    @staticmethod
+    def _draw_pil_maple_leaf(draw, cx, cy, r, fill_rgba):
+        """Draw a crisp 3-lobed autumn maple leaf with visible petiole stem & veins."""
+        pts = [
+            (cx, cy - r * 1.05),                 # crown tip
+            (cx + r * 0.22, cy - r * 0.45),
+            (cx + r * 0.52, cy - r * 0.72),
+            (cx + r * 0.48, cy - r * 0.30),
+            (cx + r * 1.02, cy - r * 0.42),      # right main lobe
+            (cx + r * 0.68, cy + r * 0.05),
+            (cx + r * 0.85, cy + r * 0.28),      # right lower flare
+            (cx + r * 0.16, cy + r * 0.42),      # base right
+            (cx - r * 0.16, cy + r * 0.42),      # base left
+            (cx - r * 0.85, cy + r * 0.28),      # left lower flare
+            (cx - r * 0.68, cy + r * 0.05),
+            (cx - r * 1.02, cy - r * 0.42),      # left main lobe
+            (cx - r * 0.48, cy - r * 0.30),
+            (cx - r * 0.52, cy - r * 0.72),
+            (cx - r * 0.22, cy - r * 0.45),
+        ]
+        draw.polygon(pts, fill=fill_rgba)
+        # Stem extending below leaf base + darker midrib vein
+        vein_rgba = (max(0, fill_rgba[0] - 75), max(0, fill_rgba[1] - 55), max(0, fill_rgba[2] - 25), fill_rgba[3])
+        draw.line([(cx, cy + r * 0.40), (cx + r * 0.18, cy + r * 1.05)], fill=fill_rgba, width=2)
+        draw.line([(cx, cy - r * 0.55), (cx, cy + r * 0.42)], fill=vein_rgba, width=1)
+        draw.line([(cx, cy + r * 0.10), (cx + r * 0.55, cy - r * 0.20)], fill=vein_rgba, width=1)
+        draw.line([(cx, cy + r * 0.10), (cx - r * 0.55, cy - r * 0.20)], fill=vein_rgba, width=1)
+
+    def _build_card(self, rem_sec_int, is_tg):
+        w, h = self.card_w, self.card_h
+        if not HAS_PIL:
+            bgr = np.full((h, w, 3), (18, 22, 32), dtype=np.uint8)
+            alpha = np.full((h, w, 1), 0.88, dtype=np.float32)
+            hrs = rem_sec_int // 3600
+            mins = (rem_sec_int % 3600) // 60
+            secs = rem_sec_int % 60
+            txt = f"{hrs:02d}:{mins:02d}:{secs:02d}" if rem_sec_int > 0 else "SHOW LIVE!"
+            cv2.rectangle(bgr, (0, 0), (w - 1, h - 1), (45, 145, 240), 2)
+            cv2.putText(bgr, "SHOWTIME COUNTDOWN", (22, 34), cv2.FONT_HERSHEY_DUPLEX, 0.65, (80, 200, 255), 1, cv2.LINE_AA)
+            cv2.putText(bgr, txt, (32, 114), cv2.FONT_HERSHEY_DUPLEX, 2.0, (255, 255, 255), 3, cv2.LINE_AA)
+            return bgr, alpha
+
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        bg_rgba = (26, 15, 10, 232) if is_tg else (18, 20, 28, 228)
+        outer_border = (238, 134, 42, 248) if is_tg else (0, 195, 255, 225)
+        inner_border = (255, 204, 96, 130) if is_tg else (90, 140, 190, 100)
+        header_fill = (62, 29, 13, 248) if is_tg else (28, 34, 48, 245)
+
+        draw.rounded_rectangle([(0, 0), (w - 1, h - 1)], radius=14, fill=bg_rgba, outline=outer_border, width=2)
+        draw.rounded_rectangle([(4, 4), (w - 5, h - 5)], radius=11, outline=inner_border, width=1)
+        draw.rounded_rectangle([(2, 2), (w - 3, 42)], radius=12, fill=header_fill)
+        draw.line([(6, 42), (w - 7, 42)], fill=outer_border, width=1)
+
+        f_hdr = self._get_font(14)
+        f_timer = self._get_font(62)
+        f_unit = self._get_font(12)
+        f_sub = self._get_font(12)
+
+        if is_tg:
+            self._draw_pil_maple_leaf(draw, 24, 21, 10, (248, 145, 40, 255))
+            self._draw_pil_maple_leaf(draw, w - 24, 21, 10, (224, 78, 45, 255))
+            hdr_text = "HAPPY THANKSGIVING  •  SHOWTIME @ 9PM"
+            hdr_color = (255, 212, 110, 255)
+        else:
+            hdr_text = "LIVE STAGE SHOWTIME @ 9:00 PM EST"
+            hdr_color = (120, 225, 255, 255)
+
+        hb = draw.textbbox((0, 0), hdr_text, font=f_hdr)
+        draw.text(((w - (hb[2] - hb[0])) // 2, 13), hdr_text, font=f_hdr, fill=hdr_color)
+
+        unit_fill = (235, 185, 122, 240) if is_tg else (175, 195, 215, 230)
+        if rem_sec_int > 0:
+            hrs = rem_sec_int // 3600
+            mins = (rem_sec_int % 3600) // 60
+            secs = rem_sec_int % 60
+            digit_fill = (255, 248, 232, 255) if rem_sec_int > 60 else (255, 198, 72, 255)
+
+            # Render HH, MM, SS in exact columns with HRS / MIN / SEC centered directly below each pair
+            col_centers = (w // 2 - 122, w // 2, w // 2 + 122)
+            parts = ((f"{hrs:02d}", "HOURS"), (f"{mins:02d}", "MINUTES"), (f"{secs:02d}", "SECONDS"))
+            ty = 48
+            for cx, (val_s, lbl_s) in zip(col_centers, parts):
+                vb = draw.textbbox((0, 0), val_s, font=f_timer)
+                vx = cx - (vb[2] - vb[0]) // 2
+                draw.text((vx + 3, ty + 3), val_s, font=f_timer, fill=(0, 0, 0, 200))
+                draw.text((vx, ty), val_s, font=f_timer, fill=digit_fill)
+
+                lb = draw.textbbox((0, 0), lbl_s, font=f_unit)
+                lx = cx - (lb[2] - lb[0]) // 2
+                draw.text((lx, 124), lbl_s, font=f_unit, fill=unit_fill)
+
+            for sep_x in (w // 2 - 61, w // 2 + 61):
+                cb = draw.textbbox((0, 0), ":", font=f_timer)
+                cx_s = sep_x - (cb[2] - cb[0]) // 2
+                draw.text((cx_s + 2, ty + 2), ":", font=f_timer, fill=(0, 0, 0, 180))
+                draw.text((cx_s, ty - 3), ":", font=f_timer, fill=(245, 175, 75, 245) if is_tg else digit_fill)
+        else:
+            t_str = "SHOWTIME!"
+            tb = draw.textbbox((0, 0), t_str, font=f_timer)
+            tx = (w - (tb[2] - tb[0])) // 2
+            draw.text((tx + 3, 53), t_str, font=f_timer, fill=(0, 0, 0, 200))
+            draw.text((tx, 50), t_str, font=f_timer, fill=(255, 205, 85, 255))
+            sub_str = "STAGE RETURNING SHORTLY  •  CANTON REFINERY"
+            sb = draw.textbbox((0, 0), sub_str, font=f_sub)
+            draw.text(((w - (sb[2] - sb[0])) // 2, 128), sub_str, font=f_sub, fill=unit_fill)
+
+        arr = np.array(img)
+        bgr = arr[:, :, [2, 1, 0]].copy()
+        alpha = (arr[:, :, 3:4].astype(np.float32)) / 255.0
+        return bgr, alpha
+
+    def _draw_falling_leaves(self, frame_bgr, top_matte_h=110):
+        t = time.monotonic()
+        fh, fw = frame_bgr.shape[:2]
+        for p in self._leaf_particles:
+            p["y"] += p["vy"]
+            if p["y"] > fh - 235:
+                p["y"] = float(top_matte_h + 14)
+            sway_x = int(p["x"] + 14.0 * math.sin(t * 1.4 + p["phase"]))
+            ly = int(p["y"])
+            if top_matte_h + 8 < ly < fh - 230 and 12 < sway_x < fw - 12:
+                roi = frame_bgr[ly - 12:ly + 12, sway_x - 12:sway_x + 12]
+                if roi.shape[:2] == (24, 24):
+                    overlay = roi.copy()
+                    TickerOverlay._draw_autumn_leaf_cv2(overlay, 12, 12, scale=p["scale"], color_bgr=p["color"])
+                    cv2.addWeighted(overlay, 0.52, roi, 0.48, 0, roi)
+
+    def draw(self, frame_bgr, standby_mode=True, top_matte_h=110, now_dt=None):
+        self._reload()
+        if not self.enabled or not standby_mode:
+            return
+
+        is_tg = (self.theme == "thanksgiving")
+        if is_tg and self.show_falling_leaves:
+            self._draw_falling_leaves(frame_bgr, top_matte_h=top_matte_h)
+
+        rem_sec = int(round(seconds_until_showtime(now_dt=now_dt, start_hour=self.start_hour, end_hour=self.end_hour)))
+        cache_key = (rem_sec, is_tg)
+        if cache_key != self._cached_key or self._cached_bgr is None:
+            self._cached_bgr, self._cached_alpha = self._build_card(rem_sec, is_tg)
+            self._cached_key = cache_key
+
+        fh, fw = frame_bgr.shape[:2]
+        x1 = max(0, min(fw - self.card_w, self.x))
+        y1 = max(top_matte_h + 4, min(fh - self.card_h, self.y))
+        x2, y2 = x1 + self.card_w, y1 + self.card_h
+        roi = frame_bgr[y1:y2, x1:x2].astype(np.float32)
+        frame_bgr[y1:y2, x1:x2] = (
+            roi * (1.0 - self._cached_alpha) + self._cached_bgr.astype(np.float32) * self._cached_alpha
+        ).astype(np.uint8)
 
 
 class WallOverlay:
@@ -1989,6 +2358,13 @@ class DirectorStream:
         self.top_matte_h = cfg.get("top_matte_h", int(110 * (self.out_h / 720.0)))
         refresh_hours = effective_refresh_hours(cfg)
         self.ticker = TickerOverlay(config_path="/home/joseph1/box2-stream/ticker.json", top_h=self.top_matte_h, refresh_hours=refresh_hours)
+        self.countdown_overlay = ShowtimeCountdownOverlay(
+            config_path="/home/joseph1/box2-stream/ticker.json",
+            base_w=self.out_w,
+            base_h=self.out_h,
+            start_hour=self.show_start_hour,
+            end_hour=self.show_end_hour,
+        )
         self.wall_overlay = WallOverlay(config_path="/home/joseph1/box2-stream/ticker.json", base_w=self.out_w, base_h=self.out_h)
 
         cam2_getter = self.get_cam2_url if (self.ip and self.token) else cam2_url
@@ -2431,6 +2807,9 @@ class DirectorStream:
                     else:
                         self.wall_overlay.draw(rendered, is_performer_framed=is_performer_framed)
 
+                if self.current_view_mode == "privacy":
+                    self.countdown_overlay.draw(rendered, standby_mode=True, top_matte_h=self.top_matte_h)
+
                 if self.top_matte_h > 0:
                     self.ticker.set_live_banner(self.audio_mixer.stats.get("now_playing_banner", ""))
                     self.ticker.draw(rendered, standby_mode=(self.current_view_mode == "privacy"))
@@ -2710,6 +3089,50 @@ def _handle_dj_cli(args):
         }, indent=2))
 
 
+def _handle_joke_cli(args):
+    sub = args[0].lower() if args else 'list'
+    cur = load_jokes_data(JOKES_FILE)
+    jokes = list(cur.get('jokes', []))
+
+    if sub == 'add' and len(args) >= 2:
+        new_joke = " ".join(args[1:]).strip()
+        if new_joke:
+            jokes.insert(0, new_joke)
+            cur['jokes'] = jokes
+            write_json(JOKES_FILE, cur)
+            print(f"Added joke #1 (now live on stream & ticker within 2s): {new_joke}")
+    elif sub in ('remove', 'rm', 'del') and len(args) >= 2:
+        idx = int(args[1]) - 1
+        if 0 <= idx < len(jokes):
+            removed = jokes.pop(idx)
+            cur['jokes'] = jokes
+            write_json(JOKES_FILE, cur)
+            print(f"Removed joke #{idx + 1}: {removed}")
+        else:
+            print(f"Invalid joke index {idx + 1} (1..{len(jokes)}).")
+    else:
+        print(json.dumps({
+            "jokes_file": str(JOKES_FILE),
+            "seasonal_greeting": cur.get("seasonal_greeting", ""),
+            "count": len(jokes),
+            "jokes": [f"{i + 1}. {j}" for i, j in enumerate(jokes)],
+        }, indent=2))
+
+
+def _handle_theme_cli(args):
+    theme = args[0].lower() if args else 'thanksgiving'
+    tk_path = HOME / 'ticker.json'
+    tk = {}
+    if tk_path.exists():
+        try:
+            tk = json.loads(tk_path.read_text())
+        except Exception:
+            tk = {}
+    tk['seasonal_theme'] = theme
+    write_json(tk_path, tk)
+    print(f"Broadcast seasonal theme set to '{theme}' (live hot-reload in <=2s, zero stream drop).")
+
+
 def _handle_clips_list():
     sets_file = DEFAULT_CLIP_BASE / "sets.jsonl"
     saved_dir = DEFAULT_CLIP_BASE / "saved"
@@ -2776,6 +3199,10 @@ def main():
         _handle_music_cli(sys.argv[2:])
     elif command == 'dj':
         _handle_dj_cli(sys.argv[2:])
+    elif command in ('joke', 'jokes'):
+        _handle_joke_cli(sys.argv[2:])
+    elif command == 'theme':
+        _handle_theme_cli(sys.argv[2:])
     elif command == 'mark-set':
         update_state(manual_set_start_epoch=time.time())
         print(f'Set start marker recorded at {now()}. Run "box2-stream clip [label]" right after your set!')

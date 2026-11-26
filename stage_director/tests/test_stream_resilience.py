@@ -403,6 +403,34 @@ class StreamResilienceTests(unittest.TestCase):
         self.assertIn(("spotify", "Pause"), cmds_after)
         self.assertIn(("suno", "Play"), cmds_after)
 
+    def test_showtime_countdown_and_thanksgiving_jokes_weaving(self):
+        """Verifies seconds_until_showtime math and hot-loaded Thanksgiving/YurrMom jokes in ticker."""
+        b2s = _load_b2s()
+        # 5:55 PM -> 3 hours 5 minutes (11100s) until 9:00 PM showtime
+        self.assertEqual(b2s.seconds_until_showtime(datetime(2026, 11, 26, 17, 55, 0), 21, 2), 11100.0)
+        # 9:30 PM -> 0.0s (showtime currently live!)
+        self.assertEqual(b2s.seconds_until_showtime(datetime(2026, 11, 26, 21, 30, 0), 21, 2), 0.0)
+        # 2:10 AM -> 18 hours 50 minutes (67800s) until next 9:00 PM showtime
+        self.assertEqual(b2s.seconds_until_showtime(datetime(2026, 11, 27, 2, 10, 0), 21, 2), 67800.0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tk_p = os.path.join(tmp, "ticker.json")
+            jk_p = os.path.join(tmp, "jokes.json")
+            with open(tk_p, "w") as f:
+                json.dump({"title": "BOX 2", "seasonal_theme": "thanksgiving", "messages": ["SPONSOR: YURRMOM.COM"]}, f)
+            with open(jk_p, "w") as f:
+                json.dump({
+                    "seasonal_greeting": "HAPPY THANKSGIVING FROM BOX 2",
+                    "jokes": ["Get your nuts from Yurrmom.com", "Happy Thanksgiving from Yurrmom.com - we're glad you gobbled your turkey."],
+                }, f)
+
+            ticker = b2s.TickerOverlay(config_path=tk_p, refresh_hours=0, jokes_path=jk_p)
+            ticker.reload_if_needed()
+            ticker._update_full_str()
+            self.assertIn("HAPPY THANKSGIVING FROM BOX 2", ticker.full_ticker_str)
+            self.assertIn("Get your nuts from Yurrmom.com", ticker.full_ticker_str)
+            self.assertIn("gobbled your turkey", ticker.full_ticker_str)
+
 
 if __name__ == "__main__":
     unittest.main()
