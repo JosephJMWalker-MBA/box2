@@ -16,6 +16,7 @@ Core commands:
   box2-stream auto | done               resume 9PM-2AM stage / 2AM-9PM privacy schedule
   box2-stream stage | privacy           manual view lock without dropping stream
   box2-stream music [auto|on|off|next|bed|walkup|vol <0..1>]   live music & mix control
+  box2-stream sync-catalog              pull any new YurrMom.Com releases into rotation live
   box2-stream dj [launch|status|rotate|suno|spotify|house|skip-ad|test-ad]  Suno + Spotify + Ad-Swap control
   box2-stream joke [list|add "text"|remove <n>]   manage live rotating stream & ticker jokes
   box2-stream theme [thanksgiving|classic]        set broadcast seasonal theme live
@@ -35,6 +36,7 @@ import json
 import math
 import os
 from pathlib import Path
+import random
 import re
 import signal
 import ssl
@@ -193,10 +195,10 @@ def load_jokes_data(jokes_path=None):
 def format_now_playing_label(raw_track, audio_source="house_ssd", ad_shield_active=False):
     """Format clean (badge_tag, display_title) for the attached Now Playing tab beneath the ticker."""
     src = str(audio_source or "").lower()
-    if ad_shield_active or src == "box2_ads_swap":
-        return "SPONSOR", "YurrMom.Com"
-
     t = str(raw_track or "").strip()
+    if ad_shield_active or src == "box2_ads_swap" or t.upper().startswith("SPONSOR:"):
+        promo_lbl = t.split(":", 1)[1].strip() if ":" in t else "YurrMom.Com"
+        return "SPONSOR", (promo_lbl or "YurrMom.Com")
     if not t:
         return "", ""
     # Strip leading numeric track indices like '01_' or '04 - '
@@ -842,7 +844,12 @@ class BroadcastAudioMixer:
                 self._ads_proc = None
 
     def _music_reader_worker(self):
-        track_idx = 0
+        deck = []
+        played_since_promo = 0
+        promo_every_n = int(self.cfg.get("house_promo_every_tracks", 12))
+        rng = random.Random()
+        last_path = None
+
         while not self._stop_event.is_set():
             if not self._music_desired_now and self.envelope.current_gain <= 0.001:
                 self._current_track = ""
@@ -857,9 +864,27 @@ class BroadcastAudioMixer:
                 time.sleep(2.0)
                 continue
 
-            track_path = tracks[track_idx % len(tracks)]
-            track_idx = (track_idx + 1) % max(1, len(tracks))
-            self._current_track = track_path.stem
+            # Periodically weave in a sponsor/house promo from /mnt/ssd/media/box2-ads/ every N previews
+            ads = self._list_tracks(self.ads_dir) if promo_every_n > 0 else []
+            if ads and played_since_promo >= promo_every_n:
+                played_since_promo = 0
+                track_path = rng.choice(ads)
+                is_promo_spot = True
+            else:
+                # Shuffled non-repeating deck across the entire YurrMom.Com preview catalog
+                valid_set = set(tracks)
+                deck = [p for p in deck if p in valid_set]
+                if not deck:
+                    deck = list(tracks)
+                    rng.shuffle(deck)
+                    if len(deck) > 1 and deck[0] == last_path:
+                        deck.append(deck.pop(0))
+                track_path = deck.pop(0)
+                last_path = track_path
+                played_since_promo += 1
+                is_promo_spot = False
+
+            self._current_track = "SPONSOR: YurrMom.Com" if is_promo_spot else track_path.stem
             local_skip = self._skip_seq
 
             cmd = [
@@ -3382,6 +3407,9 @@ def main():
         print('VOD mode ON: Stream will briefly refresh every 3 hours at the top of the hour for Twitch VOD archiving.')
     elif command == 'music':
         _handle_music_cli(sys.argv[2:])
+    elif command in ('sync-catalog', 'sync-music'):
+        import sync_yurrmom_previews
+        print(json.dumps(sync_yurrmom_previews.sync_catalog(DEFAULT_MUSIC_DIR), indent=2))
     elif command == 'dj':
         _handle_dj_cli(sys.argv[2:])
     elif command in ('joke', 'jokes'):
