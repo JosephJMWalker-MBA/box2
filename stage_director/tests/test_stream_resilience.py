@@ -431,6 +431,14 @@ class StreamResilienceTests(unittest.TestCase):
             self.assertIn("Get your nuts from Yurrmom.com", ticker.full_ticker_str)
             self.assertIn("gobbled your turkey", ticker.full_ticker_str)
 
+            # Verify countdown box is 15% smaller (382x142) and vertically center-aligned with Parking Lot PIP (y=495, h=191)
+            cd = b2s.ShowtimeCountdownOverlay(config_path=tk_p, jokes_path=jk_p, base_w=1280, base_h=720)
+            self.assertEqual((cd.card_w, cd.card_h), (382, 142))
+            pip_mid_y = 495 + 191 / 2.0
+            cd_mid_y = cd.y + cd.card_h / 2.0
+            self.assertLessEqual(abs(cd_mid_y - pip_mid_y), 1.0)
+            self.assertEqual(cd.x, 1280 - 382 - 26)
+
 
 if __name__ == "__main__":
     unittest.main()

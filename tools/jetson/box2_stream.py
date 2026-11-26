@@ -634,15 +634,19 @@ class BroadcastAudioMixer:
         elif self._music_mode == "off":
             self._music_desired_now = False
         else:
-            # "auto": play warm-up/show music during active stage hours/showtime, stay quiet in privacy & rehearsal
-            self._music_desired_now = (cur_view == "stage" and cur_pol != "rehearse")
+            # "auto": play continuously in privacy standby (racks up YurrMom.Com Spotify streams & covers room dead air)
+            # and during 9PM-2AM showtime (with voice/stage auto-ducking); quiet only during active rehearsal.
+            self._music_desired_now = (cur_pol != "rehearse")
 
         if force or (now_mono - self._last_mpris_poll >= 1.0):
             self._last_mpris_poll = now_mono
+            # Prioritize Spotify (YurrMom.Com) during off-hours privacy standby for maximum stream royalties;
+            # run full Suno <-> Spotify rotation (or user's pinned mode) during active stage hours.
+            eff_dj_mode = "spotify" if (cur_view == "privacy" and self._dj_mode == "rotate") else self._dj_mode
             try:
                 dec, _ = self._radio_ctrl.poll_and_step(
                     music_desired_now=self._music_desired_now,
-                    dj_mode=self._dj_mode,
+                    dj_mode=eff_dj_mode,
                     suno_tracks=self._suno_block_tracks,
                     spotify_tracks=self._spotify_block_tracks,
                 )
@@ -899,11 +903,15 @@ class BroadcastAudioMixer:
                     rumble = (mono - mono_hp)[:, None]
                     mic_clean = mic_f32 - rumble
                     mic_dbfs = self.envelope.compute_rms_dbfs(mono_hp)
+                    if cur_view == "privacy":
+                        # During off-stage privacy standby, tuck ambient room mic way down so music cleanly covers dead air
+                        mic_clean = mic_clean * 0.12
                 else:
                     mic_clean = zero_stereo
                     mic_dbfs = -90.0
 
                 is_onstage = bool(self.onstage_getter()) if cur_view == "stage" else False
+                duck_mic_dbfs = mic_dbfs if cur_view == "stage" else -90.0
                 dj_bus_hot = (now_mono - self._dj_bus_last_audible_mono) < 3.0
                 dec = self._radio_decision
                 ad_swap_active = self._ad_swap_desired_now
@@ -916,7 +924,7 @@ class BroadcastAudioMixer:
 
                 has_program_audio = bool(ad_swap_active or dj_air_active or self._current_track)
                 music_gain, voice_active = self.envelope.step(
-                    mic_rms_dbfs=mic_dbfs,
+                    mic_rms_dbfs=duck_mic_dbfs,
                     is_performer_onstage=is_onstage,
                     music_enabled=(self._music_desired_now and has_program_audio),
                     now_mono=now_mono,
@@ -1701,10 +1709,12 @@ class ShowtimeCountdownOverlay:
 
         self.enabled = True
         self.theme = "thanksgiving"
-        self.card_w = 450
-        self.card_h = 166
-        self.x = base_w - self.card_w - 24  # x = 806 on 1280x720
-        self.y = base_h - self.card_h - 24  # y = 530 on 1280x720 (bottom-right, balanced with bottom-left PIP)
+        # 15% more compact (382x142 vs 450x166), vertically center-aligned with Parking Lot PIP (y=495..686 -> mid_y=590.5)
+        self.card_w = 382
+        self.card_h = 142
+        self.timer_font_size = 52
+        self.x = base_w - self.card_w - 26  # x = 872 on 1280x720 (matches 26px left margin of Parking Lot PIP)
+        self.y = int(round((495 + 191 / 2.0) - self.card_h / 2.0))  # y = 520 -> mid_y = 591.0 (matches PIP mid_y = 590.5)
         self.show_falling_leaves = True
 
         self.last_check = 0.0
@@ -1752,12 +1762,30 @@ class ShowtimeCountdownOverlay:
             try:
                 tk = json.loads(Path(self.config_path).read_text())
                 self.theme = str(tk.get("seasonal_theme", "thanksgiving")).lower()
+                p_cfg = tk.get("privacy_placeholder", {})
+                cam_cfg = tk.get("parking_lot_camera", {})
+                pip_x = int(p_cfg.get("cam2_x", 26))
+                pip_y = int(p_cfg.get("cam2_y", 495))
+                pip_h = int(cam_cfg.get("height", 191))
+                pip_mid_y = pip_y + pip_h / 2.0
+
                 c_cfg = tk.get("showtime_countdown", {})
                 if isinstance(c_cfg, dict):
                     self.enabled = bool(c_cfg.get("enabled", True))
-                    self.x = int(c_cfg.get("x", self.base_w - self.card_w - 24))
-                    self.y = int(c_cfg.get("y", self.base_h - self.card_h - 24))
+                    new_w = int(c_cfg.get("width", 382))
+                    new_h = int(c_cfg.get("height", 142))
+                    new_fs = int(c_cfg.get("timer_font_size", 52))
+                    if (new_w, new_h, new_fs) != (self.card_w, self.card_h, self.timer_font_size):
+                        self.card_w, self.card_h, self.timer_font_size = new_w, new_h, new_fs
+                        self._cached_key = None
+                    default_x = self.base_w - self.card_w - pip_x
+                    default_y = int(round(pip_mid_y - self.card_h / 2.0))
+                    self.x = int(c_cfg.get("x", default_x))
+                    self.y = int(c_cfg.get("y", default_y))
                     self.show_falling_leaves = bool(c_cfg.get("falling_leaves", True))
+                else:
+                    self.x = self.base_w - self.card_w - pip_x
+                    self.y = int(round(pip_mid_y - self.card_h / 2.0))
             except Exception:
                 pass
 
@@ -1833,19 +1861,20 @@ class ShowtimeCountdownOverlay:
         inner_border = (255, 204, 96, 130) if is_tg else (90, 140, 190, 100)
         header_fill = (62, 29, 13, 248) if is_tg else (28, 34, 48, 245)
 
-        draw.rounded_rectangle([(0, 0), (w - 1, h - 1)], radius=14, fill=bg_rgba, outline=outer_border, width=2)
-        draw.rounded_rectangle([(4, 4), (w - 5, h - 5)], radius=11, outline=inner_border, width=1)
-        draw.rounded_rectangle([(2, 2), (w - 3, 42)], radius=12, fill=header_fill)
-        draw.line([(6, 42), (w - 7, 42)], fill=outer_border, width=1)
+        draw.rounded_rectangle([(0, 0), (w - 1, h - 1)], radius=12, fill=bg_rgba, outline=outer_border, width=2)
+        draw.rounded_rectangle([(4, 4), (w - 5, h - 5)], radius=9, outline=inner_border, width=1)
+        hdr_h = 35
+        draw.rounded_rectangle([(2, 2), (w - 3, hdr_h)], radius=10, fill=header_fill)
+        draw.line([(6, hdr_h), (w - 7, hdr_h)], fill=outer_border, width=1)
 
-        f_hdr = self._get_font(14)
-        f_timer = self._get_font(62)
-        f_unit = self._get_font(12)
-        f_sub = self._get_font(12)
+        f_hdr = self._get_font(12)
+        f_timer = self._get_font(self.timer_font_size)
+        f_unit = self._get_font(10)
+        f_sub = self._get_font(11)
 
         if is_tg:
-            self._draw_pil_maple_leaf(draw, 24, 21, 10, (248, 145, 40, 255))
-            self._draw_pil_maple_leaf(draw, w - 24, 21, 10, (224, 78, 45, 255))
+            self._draw_pil_maple_leaf(draw, 20, 18, 8, (248, 145, 40, 255))
+            self._draw_pil_maple_leaf(draw, w - 20, 18, 8, (224, 78, 45, 255))
             hdr_text = "HAPPY THANKSGIVING  •  SHOWTIME @ 9PM"
             hdr_color = (255, 212, 110, 255)
         else:
@@ -1853,7 +1882,7 @@ class ShowtimeCountdownOverlay:
             hdr_color = (120, 225, 255, 255)
 
         hb = draw.textbbox((0, 0), hdr_text, font=f_hdr)
-        draw.text(((w - (hb[2] - hb[0])) // 2, 13), hdr_text, font=f_hdr, fill=hdr_color)
+        draw.text(((w - (hb[2] - hb[0])) // 2, 11), hdr_text, font=f_hdr, fill=hdr_color)
 
         unit_fill = (235, 185, 122, 240) if is_tg else (175, 195, 215, 230)
         if rem_sec_int > 0:
@@ -1862,34 +1891,36 @@ class ShowtimeCountdownOverlay:
             secs = rem_sec_int % 60
             digit_fill = (255, 248, 232, 255) if rem_sec_int > 60 else (255, 198, 72, 255)
 
-            # Render HH, MM, SS in exact columns with HRS / MIN / SEC centered directly below each pair
-            col_centers = (w // 2 - 122, w // 2, w // 2 + 122)
+            # Render HH, MM, SS in proportional columns with HOURS / MINUTES / SECONDS centered below each pair
+            col_step = int(round(w * 0.27))
+            col_centers = (w // 2 - col_step, w // 2, w // 2 + col_step)
             parts = ((f"{hrs:02d}", "HOURS"), (f"{mins:02d}", "MINUTES"), (f"{secs:02d}", "SECONDS"))
-            ty = 48
+            ty = 41
+            unit_y = h - 24
             for cx, (val_s, lbl_s) in zip(col_centers, parts):
                 vb = draw.textbbox((0, 0), val_s, font=f_timer)
                 vx = cx - (vb[2] - vb[0]) // 2
-                draw.text((vx + 3, ty + 3), val_s, font=f_timer, fill=(0, 0, 0, 200))
+                draw.text((vx + 2, ty + 2), val_s, font=f_timer, fill=(0, 0, 0, 200))
                 draw.text((vx, ty), val_s, font=f_timer, fill=digit_fill)
 
                 lb = draw.textbbox((0, 0), lbl_s, font=f_unit)
                 lx = cx - (lb[2] - lb[0]) // 2
-                draw.text((lx, 124), lbl_s, font=f_unit, fill=unit_fill)
+                draw.text((lx, unit_y), lbl_s, font=f_unit, fill=unit_fill)
 
-            for sep_x in (w // 2 - 61, w // 2 + 61):
+            for sep_x in (w // 2 - col_step // 2, w // 2 + col_step // 2):
                 cb = draw.textbbox((0, 0), ":", font=f_timer)
                 cx_s = sep_x - (cb[2] - cb[0]) // 2
                 draw.text((cx_s + 2, ty + 2), ":", font=f_timer, fill=(0, 0, 0, 180))
-                draw.text((cx_s, ty - 3), ":", font=f_timer, fill=(245, 175, 75, 245) if is_tg else digit_fill)
+                draw.text((cx_s, ty - 2), ":", font=f_timer, fill=(245, 175, 75, 245) if is_tg else digit_fill)
         else:
             t_str = "SHOWTIME!"
             tb = draw.textbbox((0, 0), t_str, font=f_timer)
             tx = (w - (tb[2] - tb[0])) // 2
-            draw.text((tx + 3, 53), t_str, font=f_timer, fill=(0, 0, 0, 200))
-            draw.text((tx, 50), t_str, font=f_timer, fill=(255, 205, 85, 255))
+            draw.text((tx + 2, 46), t_str, font=f_timer, fill=(0, 0, 0, 200))
+            draw.text((tx, 44), t_str, font=f_timer, fill=(255, 205, 85, 255))
             sub_str = "STAGE RETURNING SHORTLY  •  CANTON REFINERY"
             sb = draw.textbbox((0, 0), sub_str, font=f_sub)
-            draw.text(((w - (sb[2] - sb[0])) // 2, 128), sub_str, font=f_sub, fill=unit_fill)
+            draw.text(((w - (sb[2] - sb[0])) // 2, h - 25), sub_str, font=f_sub, fill=unit_fill)
 
         arr = np.array(img)
         bgr = arr[:, :, [2, 1, 0]].copy()
@@ -2997,7 +3028,7 @@ def _handle_music_cli(args):
     elif sub == 'auto':
         m_cfg['mode'] = 'auto'
         update_state(music=m_cfg)
-        print("Music AUTO (plays during 9PM-2AM stage / showtime with auto-ducking; quiet during privacy & rehearsal).")
+        print("Music AUTO (plays 24/7 in standby — prioritizing YurrMom.Com Spotify to cover room dead air — and auto-ducks during 9PM-2AM stage sets; quiet only during rehearsal).")
     elif sub in ('next', 'skip'):
         m_cfg['skip_seq'] = int(m_cfg.get('skip_seq', 0)) + 1
         update_state(music=m_cfg)
