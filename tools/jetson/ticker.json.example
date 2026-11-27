@@ -1,6 +1,6 @@
 {
   "title": "BOX 2  |  CANTON REFINERY",
-  "seasonal_theme": "thanksgiving",
+  "seasonal_theme": "black_friday",
   "messages": [
     "NOW ON STAGE: Open Mic Comedy Session @ 9PM EST",
     "BOOK STAGE TIME: https://box2.yurrmom.com",
@@ -11,7 +11,7 @@
   "showtime_countdown": {
     "enabled": true,
     "joke_interval_s": 14.0,
-    "falling_leaves": true
+    "falling_leaves": false
   },
   "audio_mixer": {
     "idle_volume": 0.34,

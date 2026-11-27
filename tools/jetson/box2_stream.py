@@ -19,7 +19,7 @@ Core commands:
   box2-stream sync-catalog              pull any new YurrMom.Com releases into rotation live
   box2-stream dj [launch|status|rotate|suno|spotify|house|skip-ad|test-ad]  Suno + Spotify + Ad-Swap control
   box2-stream joke [list|add "text"|remove <n>]   manage live rotating stream & ticker jokes
-  box2-stream theme [thanksgiving|classic]        set broadcast seasonal theme live
+  box2-stream theme [black_friday|thanksgiving|classic]   set broadcast seasonal theme live
   box2-stream mark-set                  mark start of a comedy set right now
   box2-stream clip [dur|--last-set] [label]   save lossless .mp4 clip without dropping stream
   box2-stream clips                     list recent detected sets and saved .mp4 clips
@@ -180,6 +180,17 @@ def seconds_until_showtime(now_dt=None, start_hour=21, end_hour=2):
     if target <= now_dt:
         target += timedelta(days=1)
     return max(0.0, (target - now_dt).total_seconds())
+
+
+def normalize_seasonal_theme(raw_theme, default="black_friday"):
+    t = str(raw_theme or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if t in ("black_friday", "blackfriday", "bf"):
+        return "black_friday"
+    if t in ("thanksgiving", "tg"):
+        return "thanksgiving"
+    if t in ("classic", "none", "default", "standard"):
+        return "classic"
+    return t or default
 
 
 def load_jokes_data(jokes_path=None):
@@ -1615,7 +1626,7 @@ class TickerOverlay:
         self.jokes_data = load_jokes_data(self.jokes_path)
         self.data = {
             "title": "BOX 2  |  CANTON REFINERY",
-            "seasonal_theme": "thanksgiving",
+            "seasonal_theme": "black_friday",
             "messages": [
                 "NOW ON STAGE: Open Mic Comedy Session",
                 "BOOK STAGE TIME: https://box2.yurrmom.com",
@@ -1655,12 +1666,12 @@ class TickerOverlay:
         # Interleave seasonal greeting & jokes cleanly into ticker rotation
         jokes = list(self.jokes_data.get("jokes", []))
         greeting = self.jokes_data.get("seasonal_greeting", "").strip()
-        theme = str(self.data.get("seasonal_theme", "thanksgiving")).lower()
+        theme = normalize_seasonal_theme(self.data.get("seasonal_theme", "black_friday"))
         raw_msgs = []
         if greeting and theme != "classic":
             raw_msgs.append(greeting)
         if jokes:
-            # Weave core venue messages with Thanksgiving & Yurrmom.com jokes in the scrolling ticker
+            # Weave core venue messages with seasonal & Yurrmom.com jokes in the scrolling ticker
             max_len = max(len(base_msgs), len(jokes))
             for i in range(max_len):
                 if i < len(base_msgs):
@@ -1735,6 +1746,19 @@ class TickerOverlay:
         cv2.line(img, (cx, int(cy - 5 * scale)), (cx, int(cy + 10 * scale)), stem_bgr, max(1, int(round(1.6 * scale))), cv2.LINE_AA)
         cv2.line(img, (cx, int(cy + 10 * scale)), (int(cx + 2 * scale), int(cy + 11 * scale)), color_bgr, max(1, int(round(1.5 * scale))), cv2.LINE_AA)
 
+    @staticmethod
+    def _draw_price_tag_cv2(img, cx, cy, scale=1.0):
+        """Draw a crisp angled Black Friday deal tag (crimson body, gold border & punch hole)."""
+        pts = np.array([
+            [int(cx - 9 * scale), int(cy - 2 * scale)],
+            [int(cx - 2 * scale), int(cy - 9 * scale)],
+            [int(cx + 8 * scale), int(cy + 1 * scale)],
+            [int(cx + 1 * scale), int(cy + 8 * scale)],
+        ], dtype=np.int32)
+        cv2.fillPoly(img, [pts], (45, 32, 218), lineType=cv2.LINE_AA)
+        cv2.polylines(img, [pts], True, (55, 200, 255), max(1, int(round(1.3 * scale))), cv2.LINE_AA)
+        cv2.circle(img, (int(cx - 4 * scale), int(cy - 4 * scale)), max(1, int(round(1.8 * scale))), (12, 12, 16), -1, cv2.LINE_AA)
+
     def reload_if_needed(self):
         now_mono = time.monotonic()
         if now_mono - self.last_load > 2.0:
@@ -1763,11 +1787,13 @@ class TickerOverlay:
     def draw(self, frame_bgr, standby_mode=False):
         h, w = frame_bgr.shape[:2]
         self.reload_if_needed()
-        is_tg = str(self.data.get("seasonal_theme", "thanksgiving")).lower() == "thanksgiving"
+        theme = normalize_seasonal_theme(self.data.get("seasonal_theme", "black_friday"))
+        is_tg = (theme == "thanksgiving")
+        is_bf = (theme == "black_friday")
 
         # 1. Solid matte banner background (y=0 to top_h)
-        frame_bgr[:self.top_h, :] = (12, 14, 20) if is_tg else (15, 15, 18)
-        sep_color = (40, 115, 205) if is_tg else (70, 70, 80)
+        frame_bgr[:self.top_h, :] = (10, 10, 14) if is_bf else ((12, 14, 20) if is_tg else (15, 15, 18))
+        sep_color = (48, 188, 250) if is_bf else ((40, 115, 205) if is_tg else (70, 70, 80))
         cv2.line(frame_bgr, (0, self.top_h - 1), (w, self.top_h - 1), sep_color, 2)
 
         # 2. [● LIVE] badge
@@ -1775,10 +1801,13 @@ class TickerOverlay:
         cv2.circle(frame_bgr, (38, 27), 4, (255, 255, 255), -1)
         cv2.putText(frame_bgr, "LIVE", (52, 33), cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
-        # 3. Stage title (+ festive autumn leaf accents in Thanksgiving theme)
+        # 3. Stage title (+ seasonal accent icon)
         title = self.data.get("title", "BOX 2  |  CANTON REFINERY")
         title_x = 140
-        if is_tg:
+        if is_bf:
+            self._draw_price_tag_cv2(frame_bgr, 143, 27, scale=1.0)
+            title_x = 160
+        elif is_tg:
             self._draw_autumn_leaf_cv2(frame_bgr, 142, 27, scale=0.95, color_bgr=(30, 135, 245))
             title_x = 160
         cv2.putText(frame_bgr, title, (title_x, 33), cv2.FONT_HERSHEY_DUPLEX, 0.6, (225, 232, 242), 1, cv2.LINE_AA)
@@ -1808,18 +1837,20 @@ class TickerOverlay:
             cv2.rectangle(frame_bgr, (bx1, by1), (bx2, by2), badge_border, 1)
             cv2.putText(frame_bgr, badge_text, (tx, ty), cv2.FONT_HERSHEY_DUPLEX, 0.55, text_color, 1, cv2.LINE_AA)
         elif standby_mode and self.data.get("privacy_placeholder", {}).get("show_standby_badge", True):
-            standby_label = self.data.get("privacy_placeholder", {}).get(
-                "badge_label",
-                "HAPPY THANKSGIVING | STANDBY" if is_tg else "STAGE STANDBY",
+            default_standby = (
+                "BLACK FRIDAY | STANDBY"
+                if is_bf
+                else ("HAPPY THANKSGIVING | STANDBY" if is_tg else "STAGE STANDBY")
             )
+            standby_label = self.data.get("privacy_placeholder", {}).get("badge_label", default_standby)
             (tw, th), _ = cv2.getTextSize(standby_label, cv2.FONT_HERSHEY_DUPLEX, 0.50, 1)
-            bx1, by1 = 478 if is_tg else 500, 12
+            bx1, by1 = (490 if is_bf else (478 if is_tg else 500)), 12
             bx2, by2 = max(710, bx1 + tw + 30), 42
             tx = bx1 + ((bx2 - bx1) - tw) // 2
             ty = by1 + ((by2 - by1) + th) // 2
-            bg_c = (18, 28, 48) if is_tg else (32, 34, 42)
-            bd_c = (45, 145, 235) if is_tg else (110, 115, 130)
-            tx_c = (120, 205, 255) if is_tg else (205, 210, 220)
+            bg_c = (18, 16, 36) if is_bf else ((18, 28, 48) if is_tg else (32, 34, 42))
+            bd_c = (55, 195, 255) if is_bf else ((45, 145, 235) if is_tg else (110, 115, 130))
+            tx_c = (105, 222, 255) if is_bf else ((120, 205, 255) if is_tg else (205, 210, 220))
             cv2.rectangle(frame_bgr, (bx1, by1), (bx2, by2), bg_c, -1)
             cv2.rectangle(frame_bgr, (bx1, by1), (bx2, by2), bd_c, 1)
             cv2.putText(frame_bgr, standby_label, (tx, ty), cv2.FONT_HERSHEY_DUPLEX, 0.50, tx_c, 1, cv2.LINE_AA)
@@ -1834,6 +1865,10 @@ class TickerOverlay:
             box_border_color = (0, 180, 255)
             ticker_text_color = (0, 220, 255)
             box_bg_color = (28, 28, 34)
+        elif is_bf:
+            box_border_color = (48, 185, 248)   # crisp Black Friday deal gold in BGR
+            ticker_text_color = (75, 218, 255)  # high-contrast Black Friday gold (#FFDA4B) in BGR
+            box_bg_color = (12, 13, 18)         # deep matte obsidian
         elif is_tg:
             box_border_color = (42, 125, 218)   # warm harvest copper-gold in BGR
             ticker_text_color = (75, 198, 255)  # rich warm Thanksgiving gold (#FFC64B) in BGR
@@ -1884,15 +1919,17 @@ class TickerOverlay:
         self._np_font_song = ImageFont.load_default()
         return self._np_font_tag, self._np_font_song
 
-    def _build_now_playing_tab(self, tag_str, song_str, is_tg):
+    def _build_now_playing_tab(self, tag_str, song_str, theme):
+        is_tg = (theme == "thanksgiving")
+        is_bf = (theme == "black_friday")
         tab_h = 30
         if not HAS_PIL:
             full_s = f"{tag_str}: {song_str}"
             (tw, _), _ = cv2.getTextSize(full_s, cv2.FONT_HERSHEY_DUPLEX, 0.45, 1)
             tab_w = min(560, max(220, tw + 46))
-            bgr = np.full((tab_h, tab_w, 3), (16, 20, 30), dtype=np.uint8)
+            bgr = np.full((tab_h, tab_w, 3), (12, 12, 16) if is_bf else (16, 20, 30), dtype=np.uint8)
             alpha = np.full((tab_h, tab_w, 1), 0.90, dtype=np.float32)
-            bd = (42, 130, 225) if is_tg else (90, 110, 140)
+            bd = (50, 190, 245) if is_bf else ((42, 130, 225) if is_tg else (90, 110, 140))
             cv2.line(bgr, (0, 0), (0, tab_h - 1), bd, 1)
             cv2.line(bgr, (tab_w - 1, 0), (tab_w - 1, tab_h - 1), bd, 1)
             cv2.line(bgr, (0, tab_h - 1), (tab_w - 1, tab_h - 1), bd, 1)
@@ -1912,8 +1949,8 @@ class TickerOverlay:
         img = Image.new("RGBA", (tab_w, tab_h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
 
-        bg_rgba = (24, 15, 10, 232) if is_tg else (18, 20, 28, 230)
-        border_rgba = (225, 128, 42, 235) if is_tg else (90, 130, 175, 220)
+        bg_rgba = (12, 12, 16, 238) if is_bf else ((24, 15, 10, 232) if is_tg else (18, 20, 28, 230))
+        border_rgba = (245, 190, 50, 240) if is_bf else ((225, 128, 42, 235) if is_tg else (90, 130, 175, 220))
         # Docked tab shape: square top corners flush against y=top_h-1, rounded bottom corners
         draw.rounded_rectangle([(0, -8), (tab_w - 1, tab_h - 1)], radius=9, fill=bg_rgba, outline=border_rgba, width=1)
 
@@ -1922,6 +1959,9 @@ class TickerOverlay:
         if tag_str == "SPOTIFY":
             pill_fill = (24, 135, 68, 235)
             pill_txt = (240, 255, 245, 255)
+        elif is_bf:
+            pill_fill = (175, 28, 42, 245)
+            pill_txt = (255, 232, 135, 255)
         elif is_tg:
             pill_fill = (78, 36, 14, 245)
             pill_txt = (255, 210, 108, 255)
@@ -1957,10 +1997,12 @@ class TickerOverlay:
         if not song_str:
             return
 
-        is_tg = str(self.data.get("seasonal_theme", "thanksgiving")).lower() == "thanksgiving"
-        ckey = (tag_str, song_str, is_tg)
+        theme = normalize_seasonal_theme(self.data.get("seasonal_theme", "black_friday"))
+        is_tg = (theme == "thanksgiving")
+        is_bf = (theme == "black_friday")
+        ckey = (tag_str, song_str, theme)
         if ckey != self._np_cache_key or self._np_bgr is None:
-            self._np_bgr, self._np_alpha = self._build_now_playing_tab(tag_str, song_str, is_tg)
+            self._np_bgr, self._np_alpha = self._build_now_playing_tab(tag_str, song_str, theme)
             self._np_cache_key = ckey
 
         fh, fw = frame_bgr.shape[:2]
@@ -1979,7 +2021,11 @@ class TickerOverlay:
 
         # Animated 4-bar mini audio equalizer on left side of tab
         t = time.monotonic()
-        bar_color = (95, 215, 50) if tag_str == "SPOTIFY" else ((65, 195, 255) if is_tg else (0, 225, 255))
+        bar_color = (
+            (95, 215, 50)
+            if tag_str == "SPOTIFY"
+            else ((55, 205, 255) if is_bf else ((65, 195, 255) if is_tg else (0, 225, 255)))
+        )
         for bi, freq in enumerate((5.2, 7.1, 4.3, 6.4)):
             bh = int(4 + 11 * (0.5 + 0.5 * math.sin(t * freq + bi * 1.3)))
             bx = x1 + 13 + bi * 5
@@ -2016,14 +2062,14 @@ class ShowtimeCountdownOverlay:
         self.end_hour = int(end_hour)
 
         self.enabled = True
-        self.theme = "thanksgiving"
+        self.theme = "black_friday"
         # 15% more compact (382x142 vs 450x166), vertically center-aligned with Parking Lot PIP (y=495..686 -> mid_y=590.5)
         self.card_w = 382
         self.card_h = 142
         self.timer_font_size = 52
         self.x = base_w - self.card_w - 26  # x = 872 on 1280x720 (matches 26px left margin of Parking Lot PIP)
         self.y = int(round((495 + 191 / 2.0) - self.card_h / 2.0))  # y = 520 -> mid_y = 591.0 (matches PIP mid_y = 590.5)
-        self.show_falling_leaves = True
+        self.show_falling_leaves = False
 
         self.last_check = 0.0
         self._fonts = {}
@@ -2069,7 +2115,7 @@ class ShowtimeCountdownOverlay:
         if os.path.exists(self.config_path):
             try:
                 tk = json.loads(Path(self.config_path).read_text())
-                self.theme = str(tk.get("seasonal_theme", "thanksgiving")).lower()
+                self.theme = normalize_seasonal_theme(tk.get("seasonal_theme", "black_friday"))
                 p_cfg = tk.get("privacy_placeholder", {})
                 cam_cfg = tk.get("parking_lot_camera", {})
                 pip_x = int(p_cfg.get("cam2_x", 26))
@@ -2090,7 +2136,7 @@ class ShowtimeCountdownOverlay:
                     default_y = int(round(pip_mid_y - self.card_h / 2.0))
                     self.x = int(c_cfg.get("x", default_x))
                     self.y = int(c_cfg.get("y", default_y))
-                    self.show_falling_leaves = bool(c_cfg.get("falling_leaves", True))
+                    self.show_falling_leaves = bool(c_cfg.get("falling_leaves", self.theme == "thanksgiving"))
                 else:
                     self.x = self.base_w - self.card_w - pip_x
                     self.y = int(round(pip_mid_y - self.card_h / 2.0))
@@ -2147,27 +2193,43 @@ class ShowtimeCountdownOverlay:
         draw.line([(cx, cy + r * 0.10), (cx + r * 0.55, cy - r * 0.20)], fill=vein_rgba, width=1)
         draw.line([(cx, cy + r * 0.10), (cx - r * 0.55, cy - r * 0.20)], fill=vein_rgba, width=1)
 
-    def _build_card(self, rem_sec_int, is_tg):
+    @staticmethod
+    def _draw_pil_price_tag(draw, cx, cy, r):
+        """Draw a crisp angled Black Friday deal tag icon with gold outline and punch hole."""
+        pts = [
+            (cx - r * 0.90, cy - r * 0.20),
+            (cx - r * 0.20, cy - r * 0.90),
+            (cx + r * 0.85, cy + r * 0.15),
+            (cx + r * 0.15, cy + r * 0.85),
+        ]
+        draw.polygon(pts, fill=(220, 34, 48, 255), outline=(255, 208, 72, 255))
+        hr = max(1.4, r * 0.18)
+        hx, hy = cx - r * 0.40, cy - r * 0.40
+        draw.ellipse([(hx - hr, hy - hr), (hx + hr, hy + hr)], fill=(20, 14, 18, 255))
+
+    def _build_card(self, rem_sec_int, theme):
+        is_tg = (theme == "thanksgiving")
+        is_bf = (theme == "black_friday")
         w, h = self.card_w, self.card_h
         if not HAS_PIL:
-            bgr = np.full((h, w, 3), (18, 22, 32), dtype=np.uint8)
+            bgr = np.full((h, w, 3), (12, 12, 16) if is_bf else (18, 22, 32), dtype=np.uint8)
             alpha = np.full((h, w, 1), 0.88, dtype=np.float32)
             hrs = rem_sec_int // 3600
             mins = (rem_sec_int % 3600) // 60
             secs = rem_sec_int % 60
             txt = f"{hrs:02d}:{mins:02d}:{secs:02d}" if rem_sec_int > 0 else "SHOW LIVE!"
-            cv2.rectangle(bgr, (0, 0), (w - 1, h - 1), (45, 145, 240), 2)
-            cv2.putText(bgr, "SHOWTIME COUNTDOWN", (22, 34), cv2.FONT_HERSHEY_DUPLEX, 0.65, (80, 200, 255), 1, cv2.LINE_AA)
+            cv2.rectangle(bgr, (0, 0), (w - 1, h - 1), (48, 190, 245) if is_bf else (45, 145, 240), 2)
+            cv2.putText(bgr, "BLACK FRIDAY SHOWTIME" if is_bf else "SHOWTIME COUNTDOWN", (22, 34), cv2.FONT_HERSHEY_DUPLEX, 0.65, (80, 215, 255), 1, cv2.LINE_AA)
             cv2.putText(bgr, txt, (32, 114), cv2.FONT_HERSHEY_DUPLEX, 2.0, (255, 255, 255), 3, cv2.LINE_AA)
             return bgr, alpha
 
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
 
-        bg_rgba = (26, 15, 10, 232) if is_tg else (18, 20, 28, 228)
-        outer_border = (238, 134, 42, 248) if is_tg else (0, 195, 255, 225)
-        inner_border = (255, 204, 96, 130) if is_tg else (90, 140, 190, 100)
-        header_fill = (62, 29, 13, 248) if is_tg else (28, 34, 48, 245)
+        bg_rgba = (12, 12, 16, 238) if is_bf else ((26, 15, 10, 232) if is_tg else (18, 20, 28, 228))
+        outer_border = (245, 190, 48, 248) if is_bf else ((238, 134, 42, 248) if is_tg else (0, 195, 255, 225))
+        inner_border = (230, 48, 62, 150) if is_bf else ((255, 204, 96, 130) if is_tg else (90, 140, 190, 100))
+        header_fill = (24, 16, 20, 250) if is_bf else ((62, 29, 13, 248) if is_tg else (28, 34, 48, 245))
 
         draw.rounded_rectangle([(0, 0), (w - 1, h - 1)], radius=12, fill=bg_rgba, outline=outer_border, width=2)
         draw.rounded_rectangle([(4, 4), (w - 5, h - 5)], radius=9, outline=inner_border, width=1)
@@ -2180,7 +2242,12 @@ class ShowtimeCountdownOverlay:
         f_unit = self._get_font(10)
         f_sub = self._get_font(11)
 
-        if is_tg:
+        if is_bf:
+            self._draw_pil_price_tag(draw, 22, 18, 8)
+            self._draw_pil_price_tag(draw, w - 22, 18, 8)
+            hdr_text = "BLACK FRIDAY  •  SHOWTIME @ 9PM"
+            hdr_color = (255, 218, 92, 255)
+        elif is_tg:
             self._draw_pil_maple_leaf(draw, 20, 18, 8, (248, 145, 40, 255))
             self._draw_pil_maple_leaf(draw, w - 20, 18, 8, (224, 78, 45, 255))
             hdr_text = "HAPPY THANKSGIVING  •  SHOWTIME @ 9PM"
@@ -2192,7 +2259,7 @@ class ShowtimeCountdownOverlay:
         hb = draw.textbbox((0, 0), hdr_text, font=f_hdr)
         draw.text(((w - (hb[2] - hb[0])) // 2, 11), hdr_text, font=f_hdr, fill=hdr_color)
 
-        unit_fill = (235, 185, 122, 240) if is_tg else (175, 195, 215, 230)
+        unit_fill = (235, 198, 115, 240) if is_bf else ((235, 185, 122, 240) if is_tg else (175, 195, 215, 230))
         if rem_sec_int > 0:
             hrs = rem_sec_int // 3600
             mins = (rem_sec_int % 3600) // 60
@@ -2215,11 +2282,12 @@ class ShowtimeCountdownOverlay:
                 lx = cx - (lb[2] - lb[0]) // 2
                 draw.text((lx, unit_y), lbl_s, font=f_unit, fill=unit_fill)
 
+            colon_fill = (245, 190, 55, 245) if is_bf else ((245, 175, 75, 245) if is_tg else digit_fill)
             for sep_x in (w // 2 - col_step // 2, w // 2 + col_step // 2):
                 cb = draw.textbbox((0, 0), ":", font=f_timer)
                 cx_s = sep_x - (cb[2] - cb[0]) // 2
                 draw.text((cx_s + 2, ty + 2), ":", font=f_timer, fill=(0, 0, 0, 180))
-                draw.text((cx_s, ty - 2), ":", font=f_timer, fill=(245, 175, 75, 245) if is_tg else digit_fill)
+                draw.text((cx_s, ty - 2), ":", font=f_timer, fill=colon_fill)
         else:
             t_str = "SHOWTIME!"
             tb = draw.textbbox((0, 0), t_str, font=f_timer)
@@ -2256,14 +2324,14 @@ class ShowtimeCountdownOverlay:
         if not self.enabled or not standby_mode:
             return
 
-        is_tg = (self.theme == "thanksgiving")
-        if is_tg and self.show_falling_leaves:
+        theme = normalize_seasonal_theme(self.theme)
+        if theme == "thanksgiving" and self.show_falling_leaves:
             self._draw_falling_leaves(frame_bgr, top_matte_h=top_matte_h)
 
         rem_sec = int(round(seconds_until_showtime(now_dt=now_dt, start_hour=self.start_hour, end_hour=self.end_hour)))
-        cache_key = (rem_sec, is_tg)
+        cache_key = (rem_sec, theme)
         if cache_key != self._cached_key or self._cached_bgr is None:
-            self._cached_bgr, self._cached_alpha = self._build_card(rem_sec, is_tg)
+            self._cached_bgr, self._cached_alpha = self._build_card(rem_sec, theme)
             self._cached_key = cache_key
 
         fh, fw = frame_bgr.shape[:2]
@@ -3558,7 +3626,7 @@ def _handle_joke_cli(args):
 
 
 def _handle_theme_cli(args):
-    theme = args[0].lower() if args else 'thanksgiving'
+    theme = normalize_seasonal_theme(args[0] if args else 'black_friday')
     tk_path = HOME / 'ticker.json'
     tk = {}
     if tk_path.exists():

@@ -458,7 +458,7 @@ class ChessHeatLiveOverlay:
         self.move_interval_s = float(move_interval_s)
         self.layer_cycle_plies = max(2, int(layer_cycle_plies))
         self.enabled = True
-        self.theme = "thanksgiving"
+        self.theme = "black_friday"
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -534,7 +534,8 @@ class ChessHeatLiveOverlay:
         try:
             import json
             tk = json.loads(Path(self.config_path).read_text())
-            self.theme = str(tk.get("seasonal_theme", "thanksgiving")).lower()
+            raw_t = str(tk.get("seasonal_theme", "black_friday")).strip().lower().replace("-", "_").replace(" ", "_")
+            self.theme = "black_friday" if raw_t in ("black_friday", "blackfriday", "bf", "") else raw_t
             ch_cfg = tk.get("chessheat_overlay", {})
             if isinstance(ch_cfg, dict):
                 self.enabled = bool(ch_cfg.get("enabled", True))
@@ -568,15 +569,16 @@ class ChessHeatLiveOverlay:
     ):
         w, h = self.card_w, self.card_h
         is_tg = (self.theme == "thanksgiving")
+        is_bf = (self.theme == "black_friday")
 
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
 
-        bg_rgba = (22, 15, 11, 232) if is_tg else (16, 19, 27, 230)
-        outer_border = (232, 132, 42, 240) if is_tg else (70, 140, 205, 225)
-        inner_border = (255, 202, 95, 105) if is_tg else (90, 140, 190, 95)
-        hdr_fill = (56, 27, 13, 246) if is_tg else (26, 33, 46, 246)
-        sub_fill = (36, 20, 12, 240) if is_tg else (20, 26, 38, 240)
+        bg_rgba = (12, 13, 17, 236) if is_bf else ((22, 15, 11, 232) if is_tg else (16, 19, 27, 230))
+        outer_border = (242, 188, 48, 242) if is_bf else ((232, 132, 42, 240) if is_tg else (70, 140, 205, 225))
+        inner_border = (225, 52, 65, 115) if is_bf else ((255, 202, 95, 105) if is_tg else (90, 140, 190, 95))
+        hdr_fill = (24, 16, 20, 248) if is_bf else ((56, 27, 13, 246) if is_tg else (26, 33, 46, 246))
+        sub_fill = (16, 16, 22, 242) if is_bf else ((36, 20, 12, 240) if is_tg else (20, 26, 38, 240))
 
         draw.rounded_rectangle([(0, 0), (w - 1, h - 1)], radius=12, fill=bg_rgba, outline=outer_border, width=2)
         draw.rounded_rectangle([(4, 4), (w - 5, h - 5)], radius=9, outline=inner_border, width=1)
@@ -596,7 +598,7 @@ class ChessHeatLiveOverlay:
 
         # Row 1: Accurate Source Badge (`HISTORICAL` vs `LIVE SIM`) + Game Title
         is_sim = (source_badge == "LIVE SIM")
-        b_fill = (24, 118, 86, 245) if is_sim else ((168, 82, 22, 245) if is_tg else (45, 95, 165, 245))
+        b_fill = (24, 118, 86, 245) if is_sim else ((175, 30, 45, 245) if is_bf else ((168, 82, 22, 245) if is_tg else (45, 95, 165, 245)))
         tb = draw.textbbox((0, 0), source_badge, font=f_badge)
         bw = (tb[2] - tb[0]) + 12
         draw.rounded_rectangle([(10, 6), (10 + bw, 24)], radius=4, fill=b_fill)
@@ -604,11 +606,11 @@ class ChessHeatLiveOverlay:
 
         max_title_chars = 36
         disp_title = game_title if len(game_title) <= max_title_chars else (game_title[:max_title_chars - 2] + "..")
-        draw.text((16 + bw, 8), disp_title, font=f_title, fill=(255, 236, 200, 255) if is_tg else (230, 240, 250, 255))
+        draw.text((16 + bw, 8), disp_title, font=f_title, fill=(255, 240, 205, 255) if (is_bf or is_tg) else (230, 240, 250, 255))
 
         # Row 2: Accurate Typed ChessHeat Layer Name
         layer_lbl = LAYER_TITLES.get(layer_key, layer_key)
-        draw.text((12, 35), layer_lbl, font=f_layer, fill=(255, 198, 92, 250) if is_tg else (115, 215, 255, 250))
+        draw.text((12, 35), layer_lbl, font=f_layer, fill=(255, 212, 85, 250) if is_bf else ((255, 198, 92, 250) if is_tg else (115, 215, 255, 250)))
 
         # Board Geometry: 8x8 * 33px = 264x264 at (18, 58)
         sq_px = 33
@@ -721,7 +723,7 @@ class ChessHeatLiveOverlay:
         draw.line([(6, 334), (w - 7, 334)], fill=(outer_border[0], outer_border[1], outer_border[2], 130), width=1)
         inst_lbl = "Stockfish 16" if self._engine is not None else "Python-Chess Exact"
         foot_txt = f"Persp: {perspective_lbl}  •  Instrument: {inst_lbl}  •  ChessHeat v1"
-        draw.text((12, 341), foot_txt, font=f_foot, fill=(215, 180, 138, 235) if is_tg else (175, 195, 215, 230))
+        draw.text((12, 341), foot_txt, font=f_foot, fill=(225, 195, 130, 235) if is_bf else ((215, 180, 138, 235) if is_tg else (175, 195, 215, 230)))
 
         arr = np.array(img)
         bgr = arr[:, :, [2, 1, 0]].copy()

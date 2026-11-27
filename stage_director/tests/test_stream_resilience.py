@@ -403,13 +403,25 @@ class StreamResilienceTests(unittest.TestCase):
         self.assertIn(("spotify", "Pause"), cmds_after)
         self.assertIn(("suno", "Play"), cmds_after)
 
-    def test_showtime_countdown_and_thanksgiving_jokes_weaving(self):
-        """Verifies seconds_until_showtime math and hot-loaded Thanksgiving/YurrMom jokes in ticker."""
+    def test_showtime_countdown_and_seasonal_jokes_weaving(self):
+        """Verifies seconds_until_showtime math, Black Friday default theme, and hot-loaded YurrMom jokes in ticker."""
         b2s = _load_b2s()
+        self.assertEqual(b2s.normalize_seasonal_theme("black-friday"), "black_friday")
+        self.assertEqual(b2s.normalize_seasonal_theme("bf"), "black_friday")
+        self.assertEqual(b2s.normalize_seasonal_theme(""), "black_friday")
+        self.assertEqual(b2s.normalize_seasonal_theme("thanksgiving"), "thanksgiving")
+        self.assertEqual(b2s.normalize_seasonal_theme("classic"), "classic")
+
+        # Verify repo jokes.json is updated to Black Friday + Yurrmom.com
+        repo_jokes = b2s.load_jokes_data()
+        self.assertIn("BLACK FRIDAY", repo_jokes["seasonal_greeting"].upper())
+        self.assertTrue(any("yurrmom.com" in j.lower() for j in repo_jokes["jokes"]))
+        self.assertGreaterEqual(len(repo_jokes["jokes"]), 8)
+
         # 5:55 PM -> 3 hours 5 minutes (11100s) until 9:00 PM showtime
-        self.assertEqual(b2s.seconds_until_showtime(datetime(2026, 11, 26, 17, 55, 0), 21, 2), 11100.0)
+        self.assertEqual(b2s.seconds_until_showtime(datetime(2026, 11, 27, 17, 55, 0), 21, 2), 11100.0)
         # 9:30 PM -> 0.0s (showtime currently live!)
-        self.assertEqual(b2s.seconds_until_showtime(datetime(2026, 11, 26, 21, 30, 0), 21, 2), 0.0)
+        self.assertEqual(b2s.seconds_until_showtime(datetime(2026, 11, 27, 21, 30, 0), 21, 2), 0.0)
         # 2:10 AM -> 18 hours 50 minutes (67800s) until next 9:00 PM showtime
         self.assertEqual(b2s.seconds_until_showtime(datetime(2026, 11, 27, 2, 10, 0), 21, 2), 67800.0)
 
@@ -417,27 +429,50 @@ class StreamResilienceTests(unittest.TestCase):
             tk_p = os.path.join(tmp, "ticker.json")
             jk_p = os.path.join(tmp, "jokes.json")
             with open(tk_p, "w") as f:
-                json.dump({"title": "BOX 2", "seasonal_theme": "thanksgiving", "messages": ["SPONSOR: YURRMOM.COM"]}, f)
+                json.dump({"title": "BOX 2", "seasonal_theme": "black_friday", "messages": ["SPONSOR: YURRMOM.COM"]}, f)
             with open(jk_p, "w") as f:
                 json.dump({
-                    "seasonal_greeting": "HAPPY THANKSGIVING FROM BOX 2",
-                    "jokes": ["Get your nuts from Yurrmom.com", "Happy Thanksgiving from Yurrmom.com - we're glad you gobbled your turkey."],
+                    "seasonal_greeting": "BLACK FRIDAY LIVE FROM BOX 2 & YURRMOM.COM",
+                    "jokes": [
+                        "Get your nuts from Yurrmom.com -- the only Black Friday doorbuster worth lining up for.",
+                        "Happy Black Friday from Yurrmom.com -- 100% off bad vibes, zero trampling required.",
+                    ],
                 }, f)
 
             ticker = b2s.TickerOverlay(config_path=tk_p, refresh_hours=0, jokes_path=jk_p)
             ticker.reload_if_needed()
             ticker._update_full_str()
-            self.assertIn("HAPPY THANKSGIVING FROM BOX 2", ticker.full_ticker_str)
+            self.assertIn("BLACK FRIDAY LIVE FROM BOX 2 & YURRMOM.COM", ticker.full_ticker_str)
             self.assertIn("Get your nuts from Yurrmom.com", ticker.full_ticker_str)
-            self.assertIn("gobbled your turkey", ticker.full_ticker_str)
+            self.assertIn("Black Friday doorbuster", ticker.full_ticker_str)
 
             # Verify countdown box is 15% smaller (382x142) and vertically center-aligned with Parking Lot PIP (y=495, h=191)
             cd = b2s.ShowtimeCountdownOverlay(config_path=tk_p, jokes_path=jk_p, base_w=1280, base_h=720)
+            self.assertEqual(cd.theme, "black_friday")
+            self.assertFalse(cd.show_falling_leaves)
             self.assertEqual((cd.card_w, cd.card_h), (382, 142))
             pip_mid_y = 495 + 191 / 2.0
             cd_mid_y = cd.y + cd.card_h / 2.0
             self.assertLessEqual(abs(cd_mid_y - pip_mid_y), 1.0)
             self.assertEqual(cd.x, 1280 - 382 - 26)
+
+            if HAS_NUMPY:
+                try:
+                    import cv2  # noqa: F401
+                    has_cv2 = True
+                except ImportError:
+                    has_cv2 = False
+                if has_cv2:
+                    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+                    ticker.draw(frame, standby_mode=True)
+                    ticker.draw_now_playing_tab(frame, {
+                        "music_playing": True,
+                        "music_track": "01_YurrMom.Com - I LIKE ROCKS",
+                        "audio_source": "house_ssd",
+                        "ad_shield_active": False,
+                    })
+                    cd.draw(frame, standby_mode=True, top_matte_h=110, now_dt=datetime(2026, 11, 27, 16, 30, 0))
+                    self.assertEqual(cd._cached_bgr.shape, (142, 382, 3))
 
             # Verify Now Playing tab label cleanup for YurrMom.Com SSD & Spotify tracks
             self.assertEqual(
