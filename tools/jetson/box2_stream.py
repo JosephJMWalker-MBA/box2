@@ -64,6 +64,7 @@ FFPROBE = '/usr/bin/ffprobe'
 DEFAULT_SSD_ROOT = Path('/mnt/ssd')
 DEFAULT_CLIP_BASE = (DEFAULT_SSD_ROOT / 'box2-clips') if DEFAULT_SSD_ROOT.exists() else (HOME / 'clips')
 DEFAULT_MUSIC_DIR = (DEFAULT_SSD_ROOT / 'media' / 'box2-music') if DEFAULT_SSD_ROOT.exists() else (HOME / 'music')
+DEFAULT_STAGE_BEDS_DIR = (DEFAULT_SSD_ROOT / 'media' / 'box2-stage-beds') if DEFAULT_SSD_ROOT.exists() else (HOME / 'stage-beds')
 DEFAULT_ADS_DIR = (DEFAULT_SSD_ROOT / 'media' / 'box2-ads') if DEFAULT_SSD_ROOT.exists() else (HOME / 'ads')
 AUDIO_EXTS = ('.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.mp4')
 
@@ -212,6 +213,9 @@ def format_now_playing_label(raw_track, audio_source="house_ssd", ad_shield_acti
         return "SPOTIFY", t
     if src == "dj_suno":
         return "SUNO", t
+    if src == "stage_bed" or t.lower().startswith("stage groove -"):
+        bed_lbl = re.sub(r'^stage groove\s*-\s*', '', t, flags=re.I).strip()
+        return "STAGE GROOVE", (bed_lbl or t)
     return "NOW PLAYING", t
 
 
@@ -380,7 +384,8 @@ class AutoDuckEnvelope:
         self,
         idle_volume=0.34,
         ducked_volume=0.05,
-        onstage_volume=0.06,
+        onstage_volume=0.14,
+        onstage_speech_volume=0.08,
         walkup_volume=0.24,
         walkup_seconds=8.0,
         onstage_mode="bed",
@@ -395,6 +400,7 @@ class AutoDuckEnvelope:
         self.idle_volume = float(idle_volume)
         self.ducked_volume = float(ducked_volume)
         self.onstage_volume = float(onstage_volume)
+        self.onstage_speech_volume = float(onstage_speech_volume)
         self.walkup_volume = float(walkup_volume)
         self.walkup_seconds = float(walkup_seconds)
         self.onstage_mode = str(onstage_mode)
@@ -448,7 +454,13 @@ class AutoDuckEnvelope:
         if not music_enabled:
             target = 0.0
         elif voice_active:
-            target = 0.02 if (is_performer_onstage and self.onstage_mode == "walkup" and onstage_dur > self.walkup_seconds) else self.ducked_volume
+            if is_performer_onstage and self.onstage_mode == "walkup" and onstage_dur > self.walkup_seconds:
+                target = 0.02
+            elif is_performer_onstage and self.onstage_mode == "bed":
+                # Vocal-carved Mid/Side stage bed stays audible enough to hold attention while speech cuts right over it
+                target = self.onstage_speech_volume
+            else:
+                target = self.ducked_volume
         elif is_performer_onstage:
             if self.onstage_mode == "walkup":
                 target = self.walkup_volume if onstage_dur <= self.walkup_seconds else 0.0
@@ -517,13 +529,16 @@ class BroadcastAudioMixer:
 
         self.music_dir = Path(self.cfg.get("music_dir", str(DEFAULT_MUSIC_DIR)))
         self.music_dir.mkdir(parents=True, exist_ok=True)
+        self.stage_beds_dir = Path(self.cfg.get("stage_beds_dir", str(DEFAULT_STAGE_BEDS_DIR)))
+        self.stage_beds_dir.mkdir(parents=True, exist_ok=True)
         self.ads_dir = Path(self.cfg.get("ads_dir", str(DEFAULT_ADS_DIR)))
         self.ads_dir.mkdir(parents=True, exist_ok=True)
 
         self.envelope = AutoDuckEnvelope(
             idle_volume=float(self.cfg.get("music_idle_volume", 0.34)),
-            ducked_volume=float(self.cfg.get("music_ducked_volume", 0.05)),
-            onstage_volume=float(self.cfg.get("music_onstage_volume", 0.06)),
+            ducked_volume=float(self.cfg.get("music_ducked_volume", 0.06)),
+            onstage_volume=float(self.cfg.get("music_onstage_volume", 0.14)),
+            onstage_speech_volume=float(self.cfg.get("music_onstage_speech_volume", 0.085)),
             walkup_volume=float(self.cfg.get("music_walkup_volume", 0.24)),
             walkup_seconds=float(self.cfg.get("music_walkup_seconds", 8.0)),
             onstage_mode=str(self.cfg.get("music_onstage_mode", "bed")),
@@ -535,19 +550,22 @@ class BroadcastAudioMixer:
         self._stop_event = threading.Event()
         self._mic_queue = collections.deque(maxlen=5)   # max 250ms buffer for tight lip-sync
         self._music_queue = collections.deque(maxlen=16)
+        self._stage_bed_queue = collections.deque(maxlen=16)
         self._dj_bus_queue = collections.deque(maxlen=6)
         self._ads_queue = collections.deque(maxlen=16)
         self._mic_lock = threading.Lock()
         self._music_lock = threading.Lock()
+        self._stage_bed_lock = threading.Lock()
         self._dj_bus_lock = threading.Lock()
         self._ads_lock = threading.Lock()
         self._mic_proc = None
         self._music_proc = None
+        self._stage_bed_proc = None
         self._dj_bus_proc = None
         self._ads_proc = None
 
-        self._music_mode = "auto"  # "auto" (on during scheduled/showtime stage), "on", "off"
-        self._dj_mode = str(self.cfg.get("dj_mode", "rotate"))  # "rotate", "suno", "spotify", "house"
+        self._music_mode = "auto"  # "auto" (on during standby & showtime), "on", "off"
+        self._dj_mode = str(self.cfg.get("dj_mode", "rotate"))  # "rotate", "suno", "spotify", "house", "beds"
         self._suno_block_tracks = int(self.cfg.get("suno_tracks_per_block", 3))
         self._spotify_block_tracks = int(self.cfg.get("spotify_tracks_per_block", 3))
         self._test_ad_until_epoch = 0.0
@@ -557,7 +575,9 @@ class BroadcastAudioMixer:
         self._last_cfg_poll = 0.0
         self._last_mpris_poll = 0.0
         self._current_track = ""
+        self._current_stage_bed = ""
         self._current_ad_track = ""
+        self._bed_mix_ratio = 0.0  # 0.0 = YurrMom/DJ radio, 1.0 = Vocal-carved Stage Attention Bed
         self._music_desired_now = False
         self._ad_swap_desired_now = False
         self._dj_bus_last_audible_mono = -1e9
@@ -586,11 +606,13 @@ class BroadcastAudioMixer:
         self._mic_thread = threading.Thread(target=self._mic_reader_worker, daemon=True)
         self._dj_bus_thread = threading.Thread(target=self._dj_bus_reader_worker, daemon=True)
         self._ads_thread = threading.Thread(target=self._ads_reader_worker, daemon=True)
+        self._stage_bed_thread = threading.Thread(target=self._stage_bed_reader_worker, daemon=True)
         self._music_thread = threading.Thread(target=self._music_reader_worker, daemon=True)
         self._mix_thread = threading.Thread(target=self._mixer_loop, daemon=True)
         self._mic_thread.start()
         self._dj_bus_thread.start()
         self._ads_thread.start()
+        self._stage_bed_thread.start()
         self._music_thread.start()
         self._mix_thread.start()
 
@@ -640,7 +662,7 @@ class BroadcastAudioMixer:
         dj_cfg = st.get("dj", {})
         if isinstance(dj_cfg, dict):
             djm = str(dj_cfg.get("mode", self._dj_mode)).lower()
-            if djm in ("rotate", "suno", "spotify", "house"):
+            if djm in ("rotate", "suno", "spotify", "house", "beds"):
                 self._dj_mode = djm
             if "suno_tracks" in dj_cfg:
                 self._suno_block_tracks = max(1, int(dj_cfg["suno_tracks"]))
@@ -843,6 +865,73 @@ class BroadcastAudioMixer:
                 self._terminate_proc(proc)
                 self._ads_proc = None
 
+    def _stage_bed_reader_worker(self):
+        """Ready-buffered decoder for psychoacoustic vocal-carved Stage Attention Beds (`/mnt/ssd/media/box2-stage-beds/`).
+
+        Stays idle (0% CPU) during daytime privacy standby unless `dj_mode == 'beds'`;
+        pre-buffers 600ms whenever `view == 'stage'` so crossfade on performer arrival is instantaneous.
+        """
+        bed_deck = []
+        rng = random.Random()
+        last_bed = None
+        while not self._stop_event.is_set():
+            want_bed_ready = self._music_desired_now and (self.view_getter() == "stage" or self._dj_mode == "beds" or self._bed_mix_ratio > 0.01)
+            if not want_bed_ready:
+                self._current_stage_bed = ""
+                with self._stage_bed_lock:
+                    self._stage_bed_queue.clear()
+                time.sleep(0.3)
+                continue
+
+            beds = self._list_tracks(self.stage_beds_dir)
+            if not beds:
+                self._current_stage_bed = ""
+                time.sleep(2.0)
+                continue
+
+            valid_set = set(beds)
+            bed_deck = [p for p in bed_deck if p in valid_set]
+            if not bed_deck:
+                bed_deck = list(beds)
+                rng.shuffle(bed_deck)
+                if len(bed_deck) > 1 and bed_deck[0] == last_bed:
+                    bed_deck.append(bed_deck.pop(0))
+            bed_path = bed_deck.pop(0)
+            last_bed = bed_path
+            self._current_stage_bed = bed_path.stem
+            local_skip = self._skip_seq
+
+            cmd = [
+                FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error",
+                "-i", str(bed_path),
+                "-vn",
+                "-ac", "2", "-ar", str(self.SAMPLE_RATE), "-f", "s16le", "pipe:1",
+            ]
+            proc = None
+            try:
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                self._stage_bed_proc = proc
+                while not self._stop_event.is_set() and local_skip == self._skip_seq:
+                    if not (self._music_desired_now and (self.view_getter() == "stage" or self._dj_mode == "beds" or self._bed_mix_ratio > 0.01)):
+                        break
+                    with self._stage_bed_lock:
+                        q_len = len(self._stage_bed_queue)
+                    if q_len >= 12:
+                        time.sleep(0.03)
+                        continue
+                    buf = proc.stdout.read(self.CHUNK_BYTES)
+                    if not buf:
+                        break
+                    if len(buf) < self.CHUNK_BYTES:
+                        buf = buf + b"\x00" * (self.CHUNK_BYTES - len(buf))
+                    with self._stage_bed_lock:
+                        self._stage_bed_queue.append(buf)
+            except Exception as exc:
+                log(f"Audio mixer stage bed reader warning: {exc}")
+            finally:
+                self._terminate_proc(proc)
+                self._stage_bed_proc = None
+
     def _music_reader_worker(self):
         deck = []
         played_since_promo = 0
@@ -965,12 +1054,26 @@ class BroadcastAudioMixer:
                 ad_swap_active = self._ad_swap_desired_now
                 dj_air_active = (
                     not ad_swap_active
-                    and self._dj_mode != "house"
+                    and self._dj_mode not in ("house", "beds")
                     and dec.action == "air_bus"
                     and dj_bus_hot
                 )
 
-                has_program_audio = bool(ad_swap_active or dj_air_active or self._current_track)
+                # Smoothly crossfade (~0.9s) into the vocal-carved Stage Attention Bed whenever
+                # a performer takes the stage (or if user pinned `dj beds` mode)
+                want_stage_bed = bool(
+                    self._current_stage_bed
+                    and not ad_swap_active
+                    and (self._dj_mode == "beds" or (is_onstage and self.envelope.onstage_mode == "bed"))
+                )
+                target_bed_ratio = 1.0 if want_stage_bed else 0.0
+                bed_step = self.CHUNK_SEC / 0.90
+                if self._bed_mix_ratio < target_bed_ratio:
+                    self._bed_mix_ratio = min(1.0, self._bed_mix_ratio + bed_step)
+                elif self._bed_mix_ratio > target_bed_ratio:
+                    self._bed_mix_ratio = max(0.0, self._bed_mix_ratio - bed_step)
+
+                has_program_audio = bool(ad_swap_active or dj_air_active or self._current_track or self._current_stage_bed)
                 music_gain, voice_active = self.envelope.step(
                     mic_rms_dbfs=duck_mic_dbfs,
                     is_performer_onstage=is_onstage,
@@ -980,6 +1083,7 @@ class BroadcastAudioMixer:
                 )
 
                 music_raw = None
+                bed_raw = None
                 active_source = "off"
                 active_track_label = ""
                 banner_str = ""
@@ -997,25 +1101,47 @@ class BroadcastAudioMixer:
                                 music_raw = self._music_queue.popleft() if self._music_queue else None
                     active_source = "box2_ads_swap"
                     active_track_label = self._current_ad_track or self._current_track
-                    banner_str = dec.ticker_banner or "SPONSOR BREAK: YURRMOM.COM — BOOK STAGE TIME AT HTTPS://BOX2.YURRMOM.COM"
-                elif dj_air_active:
-                    if music_gain > 0.0005:
-                        with self._dj_bus_lock:
-                            music_raw = self._dj_bus_queue.popleft() if self._dj_bus_queue else None
-                    active_source = f"dj_{dec.source_role or 'bus'}"
-                    active_track_label = f"{dec.artist} - {dec.title}".strip(" -") if (dec.artist or dec.title) else dec.source_role
-                    banner_str = dec.ticker_banner
-                elif self._music_desired_now:
-                    if music_gain > 0.0005:
-                        with self._music_lock:
-                            music_raw = self._music_queue.popleft() if self._music_queue else None
-                    active_source = "house_ssd"
-                    active_track_label = self._current_track
+                    banner_str = dec.ticker_banner or "SPONSOR BREAK: YURRMOM.COM -- BOOK STAGE TIME AT HTTPS://BOX2.YURRMOM.COM"
+                else:
+                    if music_gain > 0.0005 and self._bed_mix_ratio > 0.001:
+                        with self._stage_bed_lock:
+                            bed_raw = self._stage_bed_queue.popleft() if self._stage_bed_queue else None
 
-                if music_raw is not None and np is not None:
-                    music_f32 = np.frombuffer(music_raw, dtype=np.int16).reshape(-1, 2).astype(np.float32) / 32768.0
+                    if self._bed_mix_ratio < 0.999:
+                        if dj_air_active:
+                            if music_gain > 0.0005:
+                                with self._dj_bus_lock:
+                                    music_raw = self._dj_bus_queue.popleft() if self._dj_bus_queue else None
+                            active_source = f"dj_{dec.source_role or 'bus'}"
+                            active_track_label = f"{dec.artist} - {dec.title}".strip(" -") if (dec.artist or dec.title) else dec.source_role
+                            banner_str = dec.ticker_banner
+                        elif self._music_desired_now:
+                            if music_gain > 0.0005:
+                                with self._music_lock:
+                                    music_raw = self._music_queue.popleft() if self._music_queue else None
+                            active_source = "house_ssd"
+                            active_track_label = self._current_track
+
+                    if self._bed_mix_ratio >= 0.5 and bed_raw is not None:
+                        active_source = "stage_bed"
+                        active_track_label = self._current_stage_bed
+
+                if np is not None:
+                    m_f32 = (np.frombuffer(music_raw, dtype=np.int16).reshape(-1, 2).astype(np.float32) / 32768.0) if music_raw is not None else zero_stereo
+                    b_f32 = (np.frombuffer(bed_raw, dtype=np.int16).reshape(-1, 2).astype(np.float32) / 32768.0) if bed_raw is not None else zero_stereo
+                    if bed_raw is not None and music_raw is not None and 0.001 < self._bed_mix_ratio < 0.999:
+                        # Equal-power crossfade between vocal YurrMom radio and vocal-carved Stage Attention Bed
+                        w_bed = math.sin(0.5 * math.pi * self._bed_mix_ratio)
+                        w_mus = math.cos(0.5 * math.pi * self._bed_mix_ratio)
+                        music_f32 = m_f32 * w_mus + b_f32 * w_bed
+                    elif self._bed_mix_ratio >= 0.5 and bed_raw is not None:
+                        music_f32 = b_f32
+                    else:
+                        music_f32 = m_f32
                 else:
                     music_f32 = zero_stereo
+
+                any_prog_chunk = (music_raw is not None) or (bed_raw is not None)
 
                 if np is not None:
                     out_i16 = self.envelope.mix_and_limit(mic_clean, music_f32, music_gain)
@@ -1030,7 +1156,7 @@ class BroadcastAudioMixer:
                     dj_mode=self._dj_mode,
                     audio_source=active_source if self._music_desired_now else "off",
                     ad_shield_active=bool(ad_swap_active),
-                    music_playing=bool(music_gain > 0.005 and music_raw is not None),
+                    music_playing=bool(music_gain > 0.005 and any_prog_chunk),
                     music_track=active_track_label if self._music_desired_now else "",
                     now_playing_banner=banner_str if self._music_desired_now else "",
                     music_gain=round(music_gain, 3),
@@ -1052,6 +1178,7 @@ class BroadcastAudioMixer:
         self._terminate_proc(self._mic_proc)
         self._terminate_proc(self._dj_bus_proc)
         self._terminate_proc(self._ads_proc)
+        self._terminate_proc(self._stage_bed_proc)
         self._terminate_proc(self._music_proc)
         try:
             os.close(self.write_fd)
@@ -3262,7 +3389,7 @@ def _handle_dj_cli(args):
         sn = dj_cfg.get('suno_tracks', 3)
         sp = dj_cfg.get('spotify_tracks', 3)
         print(f"DJ Rotation ON: Alternating {sn} Suno Discover songs -> {sp} YurrMom.Com Spotify songs (Spotify ads auto-swapped with {DEFAULT_ADS_DIR}).")
-    elif sub in ('suno', 'spotify', 'house'):
+    elif sub in ('suno', 'spotify', 'house', 'beds'):
         dj_cfg['mode'] = sub
         update_state(dj=dj_cfg)
         print(f"DJ source pinned to '{sub}'.")

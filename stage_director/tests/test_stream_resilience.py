@@ -276,14 +276,14 @@ class StreamResilienceTests(unittest.TestCase):
             gain, v_act = env.step(mic_rms_dbfs=-48.0, is_performer_onstage=True, music_enabled=True, now_mono=t, dt=0.05)
             t += 0.05
         self.assertTrue(v_act)
-        self.assertLess(gain, 0.07)
+        self.assertLess(gain, 0.10)
 
         # 4. Even 5 seconds silent pause while performer remains onstage -> stays at subtle onstage bed (0.06)
         for _ in range(100):
             gain, v_act = env.step(mic_rms_dbfs=-48.0, is_performer_onstage=True, music_enabled=True, now_mono=t, dt=0.05)
             t += 0.05
         self.assertFalse(v_act)
-        self.assertAlmostEqual(gain, 0.06, delta=0.01)
+        self.assertAlmostEqual(gain, 0.06, delta=0.015)
 
         # 5. Soft limiter prevents int16 clipping even on loud shout/laugh
         loud_mic = np.full((2400, 2), 0.90, dtype=np.float32)
@@ -451,6 +451,10 @@ class StreamResilienceTests(unittest.TestCase):
             self.assertEqual(
                 b2s.format_now_playing_label("01_yurrmom_sponsor_bumper_20s", "box2_ads_swap", True),
                 ("SPONSOR", "YurrMom.Com"),
+            )
+            self.assertEqual(
+                b2s.format_now_playing_label("Stage Groove - Late Night Host Pocket", "stage_bed", False),
+                ("STAGE GROOVE", "Late Night Host Pocket"),
             )
 
 
