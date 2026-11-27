@@ -3143,7 +3143,7 @@ class DirectorStream:
                     zoom_factor = (proposal.framing or {}).get("zoom_factor", 1.0)
                     is_performer_framed = (
                         proposal.tracking_state in ("tracking", "holding")
-                        or zoom_factor > 1.05
+                        or zoom_factor > 1.12
                     )
                     self._is_performer_framed = is_performer_framed
                     self._update_set_tracker(is_performer_framed)
