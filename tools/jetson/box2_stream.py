@@ -76,6 +76,11 @@ try:
 except ImportError:
     from tools.jetson import box2_radio
 
+try:
+    import box2_chessheat
+except ImportError:
+    from tools.jetson import box2_chessheat
+
 # Stage Director integration
 STAGE_DIR = Path("/home/joseph1/stage-director")
 if str(STAGE_DIR) not in sys.path:
@@ -2699,6 +2704,13 @@ class DirectorStream:
             start_hour=self.show_start_hour,
             end_hour=self.show_end_hour,
         )
+        self.chessheat_overlay = box2_chessheat.ChessHeatLiveOverlay(
+            config_path="/home/joseph1/box2-stream/ticker.json",
+            card_w=self.countdown_overlay.card_w,
+            card_h=362,
+            x=self.countdown_overlay.x,
+            y=148,
+        )
         self.wall_overlay = WallOverlay(config_path="/home/joseph1/box2-stream/ticker.json", base_w=self.out_w, base_h=self.out_h)
 
         cam2_getter = self.get_cam2_url if (self.ip and self.token) else cam2_url
@@ -3143,6 +3155,8 @@ class DirectorStream:
 
                 if self.current_view_mode == "privacy":
                     self.countdown_overlay.draw(rendered, standby_mode=True, top_matte_h=self.top_matte_h)
+                    self.chessheat_overlay.x = self.countdown_overlay.x
+                    self.chessheat_overlay.draw(rendered, standby_mode=True, top_matte_h=self.top_matte_h)
 
                 if self.top_matte_h > 0:
                     # Only push sponsor break alerts into scrolling ticker text; song titles display in the dedicated tab below!
@@ -3216,6 +3230,7 @@ class DirectorStream:
         self._stop_event.set()
         self.cam_reader.stop()
         self.audio_mixer.stop()
+        self.chessheat_overlay.stop()
         if self.proc.poll() is None:
             os.killpg(self.proc.pid, signal.SIGTERM)
             try:

@@ -457,6 +457,31 @@ class StreamResilienceTests(unittest.TestCase):
                 ("STAGE GROOVE", "Late Night Host Pocket"),
             )
 
+    def test_chessheat_geometry_and_typed_layer_labels(self):
+        """Verifies ChessHeat exact geometry delta, legal destination counts, and typed layer headers."""
+        b2s = _load_b2s()
+        ch = b2s.box2_chessheat
+        self.assertIn("STRUCTURAL GEOMETRY DELTA", ch.LAYER_TITLES["geometry_delta"])
+        self.assertIn("DEST MEAN CP REGRET", ch.LAYER_TITLES["dest_cp_regret"])
+        self.assertIn("LEGAL DEST MOVE COUNT", ch.LAYER_TITLES["dest_move_count"])
+        self.assertIn("PV LINE RECURRENCE", ch.LAYER_TITLES["pv_recurrence"])
+        self.assertGreaterEqual(len(ch.HISTORICAL_GAMES), 5)
+
+        if ch.HAS_CHESS:
+            board = ch.chess.Board()
+            g0 = ch.extract_board_geometry(board)
+            board.push_san("e4")
+            g1 = ch.extract_board_geometry(board)
+            sq_rgba, rays, stats = ch.compute_geometry_delta_layer(g0, g1)
+            # Pushing 1. e4 opens Bf1 and Qd1 diagonal rays and modifies attacks!
+            self.assertGreater(len(sq_rgba), 0)
+            self.assertGreater(len(rays), 0)
+            self.assertTrue(stats["row3"][1].startswith("+"))
+
+            dest_rgba, _, dest_stats = ch.compute_dest_move_count_layer(board)
+            self.assertEqual(dest_stats["row1"][1], "20")
+            self.assertGreater(len(dest_rgba), 10)
+
 
 if __name__ == "__main__":
     unittest.main()
