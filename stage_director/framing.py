@@ -103,6 +103,8 @@ class FramingConfig:
     # Pacing pull-back adaptation: widen framing during rapid walking/pacing
     pacing_pullback_speed_threshold_px_s: float = 300.0
     pacing_pullback_factor: float = 0.50
+    # Optional temporal smoothing on detected face height (s) to suppress detector box-size zoom breathing
+    face_size_smoothing_tau: float = 0.0
 
 
 class FramingEngine:
@@ -123,6 +125,7 @@ class FramingEngine:
         self._last_face_center_x: Optional[float] = None
         self._last_face_time: Optional[float] = None
         self._face_speed_x: float = 0.0
+        self._smoothed_face_height: Optional[float] = None
         self._events: List[str] = []
         self.reset()
 
@@ -143,6 +146,7 @@ class FramingEngine:
         self._last_face_center_x = None
         self._last_face_time = None
         self._face_speed_x = 0.0
+        self._smoothed_face_height = None
         self._events.clear()
 
     @property
@@ -200,7 +204,12 @@ class FramingEngine:
                     )
 
         # 1. Head-and-shoulders / close-up: calculate crop height based on face height and fraction
-        desired_h = face.height / self.config.target_face_fraction
+        eff_face_h = (
+            self._smoothed_face_height
+            if (self.config.face_size_smoothing_tau > 0.0 and self._smoothed_face_height is not None)
+            else face.height
+        )
+        desired_h = eff_face_h / self.config.target_face_fraction
         desired_w = desired_h * (16.0 / 9.0)
 
         # 2. Pacing pullback adaptation: if performer is walking briskly, widen framing slightly
@@ -239,19 +248,29 @@ class FramingEngine:
         Applies velocity limits and exponential smoothing from the very first frame,
         transitioning smoothly from safe-wide rather than instantly jumping to target.
         """
-        # Estimate performer horizontal speed for pacing pullback adaptation
+        # Estimate performer horizontal speed & smoothed face height for anti-breathing zoom stability
         if face is not None:
+            dt_face = (
+                max(0.001, monotonic_seconds - self._last_face_time)
+                if self._last_face_time is not None
+                else 0.1
+            )
             if self._last_face_center_x is not None and self._last_face_time is not None:
-                dt_face = monotonic_seconds - self._last_face_time
-                if dt_face > 0.001:
-                    inst_speed = abs(face.center_x - self._last_face_center_x) / dt_face
-                    self._face_speed_x = 0.7 * self._face_speed_x + 0.3 * inst_speed
+                inst_speed = abs(face.center_x - self._last_face_center_x) / dt_face
+                self._face_speed_x = 0.7 * self._face_speed_x + 0.3 * inst_speed
+            if self.config.face_size_smoothing_tau > 0.0:
+                if self._smoothed_face_height is None:
+                    self._smoothed_face_height = face.height
+                else:
+                    a_sz = 1.0 - math.exp(-min(0.5, dt_face) / self.config.face_size_smoothing_tau)
+                    self._smoothed_face_height += a_sz * (face.height - self._smoothed_face_height)
             self._last_face_center_x = face.center_x
             self._last_face_time = monotonic_seconds
         else:
             self._last_face_center_x = None
             self._last_face_time = None
             self._face_speed_x = 0.0
+            self._smoothed_face_height = None
             self._room_view_active = False
             self._room_view_start_monotonic = None
             self._last_room_view_end_monotonic = None

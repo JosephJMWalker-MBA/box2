@@ -482,6 +482,49 @@ class StreamResilienceTests(unittest.TestCase):
             self.assertEqual(dest_stats["row1"][1], "20")
             self.assertGreater(len(dest_rgba), 10)
 
+    def test_face_size_smoothing_eliminates_haar_box_zoom_breathing(self):
+        """Verifies `face_size_smoothing_tau` prevents detector box-size jitter from pumping camera zoom."""
+        from stage_director.framing import FramingConfig, FramingEngine
+        from stage_director.geometry import BoundingBox
+
+        def run_sim(tau_sz: float):
+            cfg = FramingConfig(
+                canvas_width=640,
+                canvas_height=360,
+                target_face_fraction=0.25,
+                headroom_fraction=0.55,
+                max_zoom=2.25,
+                face_size_smoothing_tau=tau_sz,
+                deadzone_zoom_px=58.0,
+                smoothing_tau=0.85,
+                max_zoom_speed_px_s=55.0,
+            )
+            eng = FramingEngine(cfg)
+            t = 0.0
+            eng.reset(monotonic_seconds=t)
+            # Settle onto performer standing at (300, 140) with nominal 42px face
+            for _ in range(120):
+                t += 0.1
+                win = eng.update(BoundingBox(x=279, y=119, width=42, height=42), t)
+            settled_w = win.width
+            # Inject noisy Haar face sizes oscillating wildly 28px <-> 56px for 4 seconds at same spot
+            widths = []
+            for i in range(40):
+                t += 0.1
+                noisy_h = 28.0 if (i % 2 == 0) else 56.0
+                w_now = eng.update(
+                    BoundingBox(x=300 - noisy_h / 2, y=140 - noisy_h / 2, width=noisy_h, height=noisy_h), t
+                ).width
+                widths.append(w_now)
+            return settled_w, widths
+
+        _, raw_widths = run_sim(0.0)
+        settled_w, smooth_widths = run_sim(5.0)
+        # Raw unsmoothed face size causes noticeable zoom drift/breathing, while smoothed stays locked!
+        self.assertGreater(max(raw_widths) - min(raw_widths), 5.0)
+        self.assertLessEqual(max(smooth_widths) - min(smooth_widths), 1.0)
+        self.assertAlmostEqual(smooth_widths[-1], settled_w, delta=1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

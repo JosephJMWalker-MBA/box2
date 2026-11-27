@@ -2755,29 +2755,40 @@ class DirectorStream:
             cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         self.face_cascade = cv2.CascadeClassifier(cascade_path)
 
+        prof_path = "/usr/share/opencv4/haarcascades/haarcascade_profileface.xml"
+        if not os.path.exists(prof_path):
+            prof_path = cv2.data.haarcascades + "haarcascade_profileface.xml"
+        self.profile_cascade = cv2.CascadeClassifier(prof_path) if os.path.exists(prof_path) else None
+
+        self._empty_stage_gray = None
+        self._torso_hold_started_mono = None
+        self.max_torso_hold_seconds = float(cfg.get("max_torso_hold_seconds", 90.0))
+        self.torso_diff_threshold = float(cfg.get("torso_diff_threshold", 18.0))
+
         framing_config = FramingConfig(
             canvas_width=src_w,
             canvas_height=src_h,
-            target_face_fraction=cfg.get("target_face_fraction", 0.28),
-            headroom_fraction=cfg.get("headroom_fraction", 0.50),
-            max_zoom=cfg.get("max_zoom", 2.6),
+            target_face_fraction=cfg.get("target_face_fraction", 0.25),
+            headroom_fraction=cfg.get("headroom_fraction", 0.55),
+            max_zoom=cfg.get("max_zoom", 2.25),
             periodic_room_view_enabled=cfg.get("periodic_room_view_enabled", False),
             room_view_interval_s=cfg.get("room_view_interval_s", 90.0),
             room_view_duration_s=cfg.get("room_view_duration_s", 5.0),
             pacing_pullback_speed_threshold_px_s=cfg.get("pacing_pullback_speed_threshold_px_s", 0.0),
             pacing_pullback_factor=cfg.get("pacing_pullback_factor", 0.0),
-            deadzone_x_px=cfg.get("deadzone_x_px", 15.0),
-            deadzone_y_px=cfg.get("deadzone_y_px", 12.0),
-            deadzone_zoom_px=cfg.get("deadzone_zoom_px", 35.0),
-            smoothing_tau=cfg.get("smoothing_tau", 0.70),
-            max_pan_speed_px_s=cfg.get("max_pan_speed_px_s", 180.0),
-            max_tilt_speed_px_s=cfg.get("max_tilt_speed_px_s", 120.0),
-            max_zoom_speed_px_s=cfg.get("max_zoom_speed_px_s", 50.0),
+            face_size_smoothing_tau=float(cfg.get("face_size_smoothing_tau", 5.0)),
+            deadzone_x_px=cfg.get("deadzone_x_px", 18.0),
+            deadzone_y_px=cfg.get("deadzone_y_px", 15.0),
+            deadzone_zoom_px=cfg.get("deadzone_zoom_px", 58.0),
+            smoothing_tau=cfg.get("smoothing_tau", 0.85),
+            max_pan_speed_px_s=cfg.get("max_pan_speed_px_s", 140.0 * scale_x),
+            max_tilt_speed_px_s=cfg.get("max_tilt_speed_px_s", 95.0 * scale_y),
+            max_zoom_speed_px_s=cfg.get("max_zoom_speed_px_s", 55.0 * scale_x),
         )
         tracker = PerformerTracker(
             stage_polygon=self.stage_polygon,
-            loss_hold_seconds=cfg.get("loss_hold_seconds", 6.0),
-            base_match_radius_px=cfg.get("base_match_radius_px", 85.0 * scale_x),
+            loss_hold_seconds=cfg.get("loss_hold_seconds", 14.0),
+            base_match_radius_px=cfg.get("base_match_radius_px", 95.0 * scale_x),
             max_performer_speed_px_s=cfg.get("max_performer_speed_px_s", 260.0 * scale_x),
             allow_proximity_reacquisition=True,
             require_confirmation_after_loss=False,
@@ -2785,7 +2796,7 @@ class DirectorStream:
             exclusion_boxes=self.exclusion_boxes,
             acquisition_confirm_frames=int(cfg.get("acquisition_confirm_frames", 4)),
             acquisition_window_seconds=float(cfg.get("acquisition_window_seconds", 1.2)),
-            reacquire_confirm_frames=int(cfg.get("reacquire_confirm_frames", 2)),
+            reacquire_confirm_frames=int(cfg.get("reacquire_confirm_frames", 1)),
         )
         self.adapter = StageFramingAdapter(
             config=framing_config,
@@ -3049,6 +3060,8 @@ class DirectorStream:
                         else:
                             self._held_canvas = self._render_privacy_canvas(frame)
                             self._ptz_slew_until = cur_mono + 2.8
+                            self._empty_stage_gray = None
+                            self._torso_hold_started_mono = None
                             self.adapter.framing.reset(monotonic_seconds=cur_mono)
                             self.adapter.tracker.enable()
                             if self.ip:
@@ -3111,6 +3124,74 @@ class DirectorStream:
                                 candidate_boxes.append(bbox)
                                 onstage_count += 1
 
+                        # Active Performer Continuity Fallbacks (solves zoom-out drops when looking down at notes,
+                        # holding mic over mouth/beard, or turning head in profile):
+                        anchor = self.adapter.tracker._held_subject or self.adapter.tracker.active_subject
+                        is_locked_state = self.adapter.tracker.state.value in ("tracking", "holding")
+
+                        # 1) Local ROI profile-face check (~3ms) when frontal cascade misses an active performer
+                        if not candidate_boxes and is_locked_state and anchor is not None and self.profile_cascade is not None:
+                            ax, ay = int(anchor.center_x / sx), int(anchor.center_y / sy)
+                            rx1, ry1 = max(0, ax - 85), max(0, ay - 75)
+                            rx2, ry2 = min(640, ax + 85), min(360, ay + 75)
+                            roi_g = det_gray[ry1:ry2, rx1:rx2]
+                            if roi_g.shape[0] >= 36 and roi_g.shape[1] >= 36:
+                                p_faces = self.profile_cascade.detectMultiScale(
+                                    roi_g, scaleFactor=1.15, minNeighbors=4, minSize=(22, 22), maxSize=(58, 58)
+                                )
+                                if len(p_faces) == 0:
+                                    roi_flip = cv2.flip(roi_g, 1)
+                                    p_flip = self.profile_cascade.detectMultiScale(
+                                        roi_flip, scaleFactor=1.15, minNeighbors=4, minSize=(22, 22), maxSize=(58, 58)
+                                    )
+                                    if len(p_flip) > 0:
+                                        fx_f, fy_f, fw_f, fh_f = p_flip[0]
+                                        p_faces = [(roi_g.shape[1] - fx_f - fw_f, fy_f, fw_f, fh_f)]
+                                for (pfx, pfy, pfw, pfh) in p_faces[:1]:
+                                    pbbox = BoundingBox(
+                                        x=float((rx1 + pfx) * sx),
+                                        y=float((ry1 + pfy) * sy),
+                                        width=float(pfw * sx),
+                                        height=float(pfh * sy),
+                                    )
+                                    if (
+                                        pbbox.center_y <= self.floor_cutoff_y
+                                        and not self.adapter.tracker._is_excluded(pbbox)
+                                        and self.stage_polygon.contains_box(pbbox)
+                                    ):
+                                        candidate_boxes.append(pbbox)
+                                        onstage_count += 1
+
+                        # 2) Empty-stage reference update & Torso Presence Anchor Hold:
+                        # Never zoom out to wide room shot while performer's body is still occupying the stage spot!
+                        if not is_locked_state and not candidate_boxes and cur_mono > self._ptz_slew_until + 2.0:
+                            if self._empty_stage_gray is None or self._empty_stage_gray.shape != det_gray.shape:
+                                self._empty_stage_gray = det_gray.astype(np.float32)
+                            else:
+                                # Slowly adapt empty-stage background to gradual room lighting changes
+                                self._empty_stage_gray = 0.98 * self._empty_stage_gray + 0.02 * det_gray.astype(np.float32)
+                            self._torso_hold_started_mono = None
+                        elif candidate_boxes:
+                            self._torso_hold_started_mono = None
+                        elif is_locked_state and anchor is not None and self._empty_stage_gray is not None:
+                            tx1 = max(12, int((anchor.center_x / sx) - 44))
+                            tx2 = min(512, int((anchor.center_x / sx) + 44))
+                            ty1 = max(24, int((anchor.bottom / sy)))
+                            ty2 = min(int(self.floor_cutoff_y / sy), ty1 + 92)
+                            if tx2 > tx1 + 16 and ty2 > ty1 + 16:
+                                torso_diff = float(np.mean(np.abs(
+                                    det_gray[ty1:ty2, tx1:tx2].astype(np.float32) - self._empty_stage_gray[ty1:ty2, tx1:tx2]
+                                )))
+                                if torso_diff >= self.torso_diff_threshold:
+                                    if self._torso_hold_started_mono is None:
+                                        self._torso_hold_started_mono = cur_mono
+                                    if (cur_mono - self._torso_hold_started_mono) <= self.max_torso_hold_seconds:
+                                        # Performer torso is still right there (e.g. reading phone notes / mic occlusion): hold lock!
+                                        candidate_boxes.append(anchor)
+                                        onstage_count = 1
+                                else:
+                                    self._torso_hold_started_mono = None
+
                         if self.adapter.tracker.state.value == "ambiguous" and candidate_boxes:
                             primary = max(candidate_boxes, key=lambda b: b.area)
                             if self.adapter.tracker._check_acquisition_persistence(primary, cur_mono):
@@ -3143,7 +3224,7 @@ class DirectorStream:
                     zoom_factor = (proposal.framing or {}).get("zoom_factor", 1.0)
                     is_performer_framed = (
                         proposal.tracking_state in ("tracking", "holding")
-                        or zoom_factor > 1.12
+                        or zoom_factor > 1.15
                     )
                     self._is_performer_framed = is_performer_framed
                     self._update_set_tracker(is_performer_framed)
