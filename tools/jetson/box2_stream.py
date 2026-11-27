@@ -323,18 +323,18 @@ def nvr_logout(ip, token):
         pass
 
 
-def nvr_goto_preset(ip, token, preset_id, channel=0, speed=32):
-    """Recall a saved optical PTZ preset on the Reolink NVR."""
+def nvr_goto_preset(ip, token, preset_id, channel=0, speed=32, settle_confirm=False):
+    """Recall a saved optical PTZ preset on the Reolink NVR (with optional backlash settle pass)."""
     if not ip or not token or not preset_id:
         return False
+    body = [{'cmd': 'PtzCtrl', 'action': 0, 'param': {'channel': int(channel), 'op': 'ToPos', 'id': int(preset_id), 'speed': int(speed)}}]
     try:
-        res = nvr_call(
-            ip,
-            f'cmd=PtzCtrl&token={token}',
-            [{'cmd': 'PtzCtrl', 'action': 0, 'param': {'channel': int(channel), 'op': 'ToPos', 'id': int(preset_id), 'speed': int(speed)}}],
-            timeout=5,
-        )
-        return res.get('code') == 0
+        res = nvr_call(ip, f'cmd=PtzCtrl&token={token}', body, timeout=5)
+        ok = res.get('code') == 0
+        if ok and settle_confirm:
+            time.sleep(3.2)
+            nvr_call(ip, f'cmd=PtzCtrl&token={token}', body, timeout=5)
+        return ok
     except Exception:
         return False
 
@@ -2909,7 +2909,11 @@ class DirectorStream:
                 roi_bg * (1.0 - mask[:, :, None]) + vis.astype(np.float32) * mask[:, :, None]
             ).astype(np.uint8)
         else:
-            x1, y1, x2, y2 = 0, int(54 * sy), int(356 * sx), int(224 * sy)
+            cx1 = int(p_cfg.get("crop_x1", 0))
+            cy1 = int(p_cfg.get("crop_y1", 54))
+            cx2 = int(p_cfg.get("crop_x2", 356))
+            cy2 = int(p_cfg.get("crop_y2", 224))
+            x1, y1, x2, y2 = int(cx1 * sx), int(cy1 * sy), int(cx2 * sx), int(cy2 * sy)
             sub = src_frame[max(0, y1):min(self.src_h, y2), max(0, x1):min(self.src_w, x2)].copy()
             sw = sub.shape[1]
             r_start, r_zero = int(285 * sx), int(320 * sx)
@@ -3055,6 +3059,7 @@ class DirectorStream:
                                 threading.Thread(
                                     target=nvr_goto_preset,
                                     args=(self.ip, self.get_token(), self.privacy_preset_id),
+                                    kwargs={"settle_confirm": True},
                                     daemon=True,
                                 ).start()
                         else:
