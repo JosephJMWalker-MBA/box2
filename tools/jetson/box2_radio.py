@@ -8,16 +8,21 @@ swaps out Spotify ad breaks or unowned third-party artist mix-ins on the Twitch 
 custom promos from `/mnt/ssd/media/box2-ads/` — without pausing or blocking Spotify's player.
 """
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import subprocess
 import time
+import urllib.error
+import urllib.request
 
 SPOTIFY_ARTIST_ID = "6C2jJcvEiE7iXnVY8H11LX"
+SPOTIFY_ARTIST_URI = f"spotify:artist:{SPOTIFY_ARTIST_ID}"
 SPOTIFY_ARTIST_URL = f"https://open.spotify.com/artist/{SPOTIFY_ARTIST_ID}"
 SUNO_DISCOVER_URL = "https://suno.com/discover"
 DJ_BUS_SINK = "box2_dj_bus"
 DJ_BUS_MONITOR = f"{DJ_BUS_SINK}.monitor"
+GO_LIBRESPOT_API = "http://127.0.0.1:3678"
 
 DEFAULT_ALLOWED_SPOTIFY_ARTISTS = (
     "yurrmom.com",
@@ -300,11 +305,14 @@ def ensure_pipewire_dj_bus():
         return False
 
 
-def _role_from_pid_and_meta(pid: int, url: str, title: str, artist: str) -> str:
+def _role_from_pid_and_meta(pid: int, url: str, title: str, artist: str, bus_name: str = "") -> str:
+    b = (bus_name or "").lower()
+    if "librespot" in b or "spotifyd" in b or "spotify" in b:
+        return "spotify"
     if pid > 0:
         try:
             cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "ignore").lower()
-            if "box2-spotify" in cmdline or "open.spotify.com" in cmdline:
+            if any(k in cmdline for k in ("box2-spotify", "open.spotify.com", "librespot", "spotifyd")):
                 return "spotify"
             if "box2-suno" in cmdline or "suno.com" in cmdline:
                 return "suno"
@@ -318,6 +326,112 @@ def _role_from_pid_and_meta(pid: int, url: str, title: str, artist: str) -> str:
     if "suno" in u or "suno" in t or "suno" in a:
         return "suno"
     return "browser"
+
+
+def poll_librespot_status(api_url: str = GO_LIBRESPOT_API, timeout_s: float = 0.6):
+    """Query local go-librespot Spotify Connect daemon (`BOX 2 Stream` speaker).
+
+    Returns (daemon_reachable: bool, snapshot_or_none: Optional[PlayerSnapshot]).
+    """
+    try:
+        req = urllib.request.Request(f"{api_url.rstrip('/')}/status", method="GET")
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            code = resp.getcode()
+            raw = resp.read().decode("utf-8", errors="ignore").strip()
+            if code == 204 or not raw:
+                return True, None
+            data = json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 204:
+            return True, None
+        return True, None
+    except Exception:
+        return False, None
+
+    if not isinstance(data, dict):
+        return True, None
+    stopped = bool(data.get("stopped", False))
+    paused = bool(data.get("paused", False))
+    status = "Stopped" if stopped else ("Paused" if paused else "Playing")
+    tr = data.get("track") if isinstance(data.get("track"), dict) else {}
+    title = str(tr.get("name", "") or "")
+    artists = tr.get("artist_names") or []
+    if isinstance(artists, (list, tuple)):
+        artist = ", ".join(str(x) for x in artists if x)
+    else:
+        artist = str(artists or "")
+    uri = str(tr.get("uri", "") or "")
+    if status == "Stopped" and not title and not uri:
+        return True, None
+    return True, PlayerSnapshot(
+        bus_name=api_url.rstrip("/"),
+        role="spotify",
+        playback_status=status,
+        title=title,
+        artist=artist,
+        url=uri,
+        pid=0,
+    )
+
+
+def send_librespot_command(api_url: str, method: str, fallback_uri: str = SPOTIFY_ARTIST_URI, timeout_s: float = 1.2) -> bool:
+    """Send Play/Pause/Next/Queue commands to local go-librespot REST API (also powers future Chat DJ)."""
+    base = api_url.rstrip("/")
+    route_map = {
+        "Play": ("/player/resume", b"{}"),
+        "Pause": ("/player/pause", b"{}"),
+        "PlayPause": ("/player/playpause", b"{}"),
+        "Next": ("/player/next", b"{}"),
+        "Stop": ("/player/pause", b"{}"),
+    }
+    if method not in route_map:
+        return False
+    path, payload = route_map[method]
+    try:
+        req = urllib.request.Request(
+            f"{base}{path}",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout_s):
+            return True
+    except urllib.error.HTTPError as exc:
+        if method == "Play" and fallback_uri and exc.code in (400, 404, 409, 500):
+            try:
+                body = json.dumps({"uri": fallback_uri}).encode("utf-8")
+                req2 = urllib.request.Request(
+                    f"{base}/player/play",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req2, timeout=timeout_s):
+                    return True
+            except Exception:
+                return False
+        return False
+    except Exception:
+        return False
+
+
+def queue_librespot_uri(spotify_uri: str, api_url: str = GO_LIBRESPOT_API, timeout_s: float = 1.2) -> bool:
+    """Queue a track URI (`spotify:track:...`) on BOX 2 Stream — ready hook for Twitch Chat DJ."""
+    uri = str(spotify_uri or "").strip()
+    if not uri.startswith("spotify:track:"):
+        return False
+    try:
+        body = json.dumps({"uri": uri}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{api_url.rstrip('/')}/player/add_to_queue",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout_s):
+            return True
+    except Exception:
+        return False
 
 
 class MprisRadioController:
@@ -347,25 +461,25 @@ class MprisRadioController:
     def list_players(self):
         if self._bus is None:
             self._init_dbus()
-        if self._bus is None:
-            return {}
 
         players = {}
-        try:
-            res = self._bus.call_sync(
-                "org.freedesktop.DBus",
-                "/org/freedesktop/DBus",
-                "org.freedesktop.DBus",
-                "ListNames",
-                None,
-                self._glib.VariantType("(as)"),
-                self._gio.DBusCallFlags.NONE,
-                1500,
-                None,
-            )
-            names = [n for n in res.unpack()[0] if n.startswith("org.mpris.MediaPlayer2.")]
-        except Exception:
-            return {}
+        names = []
+        if self._bus is not None:
+            try:
+                res = self._bus.call_sync(
+                    "org.freedesktop.DBus",
+                    "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus",
+                    "ListNames",
+                    None,
+                    self._glib.VariantType("(as)"),
+                    self._gio.DBusCallFlags.NONE,
+                    1500,
+                    None,
+                )
+                names = [n for n in res.unpack()[0] if n.startswith("org.mpris.MediaPlayer2.")]
+            except Exception:
+                names = []
 
         for name in names:
             try:
@@ -410,7 +524,7 @@ class MprisRadioController:
                 artist = str(raw_artists or "")
             url = str(meta.get("xesam:url", "") or "")
 
-            role = _role_from_pid_and_meta(pid, url, title, artist)
+            role = _role_from_pid_and_meta(pid, url, title, artist, bus_name=name)
             snap = PlayerSnapshot(
                 bus_name=name,
                 role=role,
@@ -423,16 +537,26 @@ class MprisRadioController:
             # Prefer a 'Playing' instance if multiple tabs exist under the same role
             if role not in players or (snap.playback_status == "Playing" and players[role].playback_status != "Playing"):
                 players[role] = snap
+
+        # Merge headless go-librespot Spotify Connect speaker (`BOX 2 Stream`) if active
+        _, ls_snap = poll_librespot_status()
+        if ls_snap is not None:
+            if "spotify" not in players or (ls_snap.playback_status == "Playing" and players["spotify"].playback_status != "Playing"):
+                players["spotify"] = ls_snap
         return players
 
     def send_command(self, bus_name: str, method: str, min_interval_s=2.5):
-        if self._bus is None or method not in ("Play", "Pause", "PlayPause", "Next", "Stop"):
+        if method not in ("Play", "Pause", "PlayPause", "Next", "Stop"):
             return False
         now_m = time.monotonic()
         key = (bus_name, method)
         if now_m - self._last_cmd_mono.get(key, 0.0) < min_interval_s:
             return False
         self._last_cmd_mono[key] = now_m
+        if str(bus_name).startswith("http://") or str(bus_name).startswith("https://"):
+            return send_librespot_command(bus_name, method)
+        if self._bus is None:
+            return False
         try:
             self._bus.call_sync(
                 bus_name,

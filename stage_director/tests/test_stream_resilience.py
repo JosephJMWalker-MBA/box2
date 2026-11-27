@@ -492,6 +492,47 @@ class StreamResilienceTests(unittest.TestCase):
                 ("STAGE GROOVE", "Late Night Host Pocket"),
             )
 
+    def test_spotify_undertone_onstage_mix_and_vocal_pocket(self):
+        """Verifies default 'undertone' onstage mode keeps audible song undertone and carves vocal pocket."""
+        b2s = _load_b2s()
+        env = b2s.AutoDuckEnvelope()
+        self.assertEqual(env.onstage_mode, "undertone")
+        self.assertAlmostEqual(env.onstage_volume, 0.18, places=2)
+        self.assertAlmostEqual(env.onstage_speech_volume, 0.11, places=2)
+
+        # Idle empty stage -> ramps toward 0.34
+        for i in range(40):
+            g, v = env.step(mic_rms_dbfs=-60.0, is_performer_onstage=False, music_enabled=True, now_mono=i * 0.1, dt=0.1)
+        self.assertFalse(v)
+        self.assertGreater(g, 0.30)
+
+        # Performer steps on stage (quiet between lines) -> smooth audible undertone (~0.18, NOT muted 0.06!)
+        for i in range(40):
+            g_on, v_on = env.step(mic_rms_dbfs=-55.0, is_performer_onstage=True, music_enabled=True, now_mono=10.0 + i * 0.1, dt=0.1)
+        self.assertFalse(v_on)
+        self.assertAlmostEqual(g_on, 0.18, delta=0.015)
+
+        # Performer speaks into mic (-22 dBFS) -> tucks smoothly to ~0.11 while staying warmly audible
+        for i in range(25):
+            g_sp, v_sp = env.step(mic_rms_dbfs=-22.0, is_performer_onstage=True, music_enabled=True, now_mono=20.0 + i * 0.05, dt=0.05)
+        self.assertTrue(v_sp)
+        self.assertAlmostEqual(g_sp, 0.11, delta=0.015)
+
+        if HAS_NUMPY:
+            t = np.arange(4800, dtype=np.float32) / 48000.0
+            # 1 kHz center vocal tone (Mid) + 1.2 kHz out-of-phase stereo pad (Side)
+            mid_1k = 0.5 * np.sin(2.0 * np.pi * 1000.0 * t)
+            side_pad = 0.4 * np.sin(2.0 * np.pi * 1200.0 * t)
+            stereo_in = np.column_stack([mid_1k + side_pad, mid_1k - side_pad]).astype(np.float32)
+            carved = env.apply_undertone_vocal_pocket(stereo_in, carve_strength=0.55)
+            in_mid_rms = float(np.sqrt(np.mean((0.5 * (stereo_in[500:, 0] + stereo_in[500:, 1])) ** 2)))
+            out_mid_rms = float(np.sqrt(np.mean((0.5 * (carved[500:, 0] + carved[500:, 1])) ** 2)))
+            in_side_rms = float(np.sqrt(np.mean((0.5 * (stereo_in[500:, 0] - stereo_in[500:, 1])) ** 2)))
+            out_side_rms = float(np.sqrt(np.mean((0.5 * (carved[500:, 0] - carved[500:, 1])) ** 2)))
+            # Center 1 kHz vocal pocket is attenuated ~50% while stereo Side pad is untouched!
+            self.assertLess(out_mid_rms, in_mid_rms * 0.60)
+            self.assertAlmostEqual(out_side_rms, in_side_rms, delta=1e-4)
+
     def test_chessheat_geometry_and_typed_layer_labels(self):
         """Verifies ChessHeat exact geometry delta, legal destination counts, and typed layer headers."""
         b2s = _load_b2s()

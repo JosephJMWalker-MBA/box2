@@ -15,8 +15,10 @@
   },
   "audio_mixer": {
     "idle_volume": 0.34,
-    "ducked_volume": 0.05,
-    "onstage_volume": 0.06,
+    "ducked_volume": 0.08,
+    "onstage_volume": 0.18,
+    "onstage_speech_volume": 0.11,
+    "onstage_mode": "undertone",
     "mic_gain": 1.85,
     "voice_threshold_dbfs": -35.0,
     "mute_mic_in_privacy": false

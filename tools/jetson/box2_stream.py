@@ -15,9 +15,9 @@ Core commands:
   box2-stream rehearse [minutes]        stage active now for rehearsal (auto-reverts to schedule)
   box2-stream auto | done               resume 9PM-2AM stage / 2AM-9PM privacy schedule
   box2-stream stage | privacy           manual view lock without dropping stream
-  box2-stream music [auto|on|off|next|bed|walkup|vol <0..1>]   live music & mix control
+  box2-stream music [auto|on|off|next|undertone|bed|walkup|vol <0..1>|onstage-vol <0..1>]   live music & mix control
   box2-stream sync-catalog              pull any new YurrMom.Com releases into rotation live
-  box2-stream dj [launch|status|rotate|suno|spotify|house|skip-ad|test-ad]  Suno + Spotify + Ad-Swap control
+  box2-stream dj [status|spotify|rotate|suno|house|ad-every <m|off>|ad-now|skip-ad|launch]  Spotify Connect + Ad Scheduler
   box2-stream joke [list|add "text"|remove <n>]   manage live rotating stream & ticker jokes
   box2-stream theme [black_friday|thanksgiving|classic]   set broadcast seasonal theme live
   box2-stream mark-set                  mark start of a comedy set right now
@@ -388,9 +388,11 @@ class AutoDuckEnvelope:
     - Hold timer (`hold_seconds` = 1.8s) + smooth release (`release_tau` = 1.2s) prevents
       pumping between words or sentences.
     - Stage-presence awareness (`is_performer_onstage`):
-      * In `"bed"` mode (default): keeps music tucked at `onstage_volume` (0.06) throughout
-        an onstage set so comedic pauses never trigger loud music swells, then fades back
-        up to `idle_volume` (0.34) when the stage empties.
+      * In `"undertone"` mode (default): keeps the live Spotify / YurrMom.Com songs streaming
+        underneath the comedian at an audible undertone (`onstage_volume` = 0.18, tucking to
+        `onstage_speech_volume` = 0.11 while speaking) with a real-time Mid-channel vocal-pocket
+        carve (~300-3400 Hz) so punchlines cut through crystal-clear over the groove.
+      * In `"bed"` mode: crossfades onstage into an instrumental Stage Attention Bed.
       * In `"walkup"` mode: plays walk-up intro for `walkup_seconds` (8.0s) when someone
         steps onto the stage (ducking immediately if they speak), then fades completely to
         0.0 for a clean dry comedy set until they step off stage.
@@ -399,12 +401,12 @@ class AutoDuckEnvelope:
     def __init__(
         self,
         idle_volume=0.34,
-        ducked_volume=0.05,
-        onstage_volume=0.14,
-        onstage_speech_volume=0.08,
+        ducked_volume=0.08,
+        onstage_volume=0.18,
+        onstage_speech_volume=None,
         walkup_volume=0.24,
         walkup_seconds=8.0,
-        onstage_mode="bed",
+        onstage_mode="undertone",
         mic_gain=1.85,
         voice_threshold_dbfs=-35.0,
         hold_seconds=1.8,
@@ -416,7 +418,10 @@ class AutoDuckEnvelope:
         self.idle_volume = float(idle_volume)
         self.ducked_volume = float(ducked_volume)
         self.onstage_volume = float(onstage_volume)
-        self.onstage_speech_volume = float(onstage_speech_volume)
+        if onstage_speech_volume is None:
+            self.onstage_speech_volume = round(float(onstage_volume) * (0.11 / 0.18), 4)
+        else:
+            self.onstage_speech_volume = float(onstage_speech_volume)
         self.walkup_volume = float(walkup_volume)
         self.walkup_seconds = float(walkup_seconds)
         self.onstage_mode = str(onstage_mode)
@@ -432,6 +437,10 @@ class AutoDuckEnvelope:
         self.voice_hold_until = -1e9
         self.onstage_since = None
         self._hp_tail = None
+        self._vp_tail_lo = None
+        self._vp_tail_hi = None
+        self._vp_delay_mid = None
+        self._vp_delay_side = None
 
     def highpass_rumble_cut(self, mono_f32):
         """Fast causal moving-average subtraction cutting <90 Hz rumble & DC offset."""
@@ -472,9 +481,9 @@ class AutoDuckEnvelope:
         elif voice_active:
             if is_performer_onstage and self.onstage_mode == "walkup" and onstage_dur > self.walkup_seconds:
                 target = 0.02
-            elif is_performer_onstage and self.onstage_mode == "bed":
-                # Vocal-carved Mid/Side stage bed stays audible enough to hold attention while speech cuts right over it
-                target = self.onstage_speech_volume
+            elif is_performer_onstage and self.onstage_mode in ("undertone", "bed"):
+                # Undertone / vocal-carved bed stays warmly audible while never exceeding onstage_volume
+                target = min(self.onstage_volume, self.onstage_speech_volume)
             else:
                 target = self.ducked_volume
         elif is_performer_onstage:
@@ -495,6 +504,45 @@ class AutoDuckEnvelope:
         if self.current_gain < 0.0005 and target == 0.0:
             self.current_gain = 0.0
         return self.current_gain, voice_active
+
+    def apply_undertone_vocal_pocket(self, stereo_f32, carve_strength=0.60):
+        """Linear-phase Mid-channel vocal-pocket carve (~300 Hz - 3.2 kHz) keeping bass, air & stereo Sides lush."""
+        if stereo_f32.size == 0:
+            return stereo_f32
+        mid = 0.5 * (stereo_f32[:, 0] + stereo_f32[:, 1])
+        side = 0.5 * (stereo_f32[:, 0] - stereo_f32[:, 1])
+        w_hi = 15    # odd length -> exact 7-sample group delay (~3.2 kHz low-pass @ 48 kHz)
+        d_hi = (w_hi - 1) // 2
+        w_lo = 161   # ~300 Hz low-pass @ 48 kHz
+        if self._vp_tail_hi is None or self._vp_tail_hi.size != w_hi - 1:
+            self._vp_tail_hi = np.zeros(w_hi - 1, dtype=np.float32)
+        if self._vp_tail_lo is None or self._vp_tail_lo.size != w_lo - 1:
+            self._vp_tail_lo = np.zeros(w_lo - 1, dtype=np.float32)
+        if self._vp_delay_mid is None or self._vp_delay_mid.size != d_hi:
+            self._vp_delay_mid = np.zeros(d_hi, dtype=np.float32)
+            self._vp_delay_side = np.zeros(d_hi, dtype=np.float32)
+
+        p_hi = np.concatenate([self._vp_tail_hi, mid])
+        self._vp_tail_hi = p_hi[-(w_hi - 1):].copy()
+        c_hi = np.cumsum(np.insert(p_hi, 0, 0.0, axis=0), dtype=np.float64)
+        lp_hi = ((c_hi[w_hi:] - c_hi[:-w_hi]) / float(w_hi)).astype(np.float32)
+
+        p_lo = np.concatenate([self._vp_tail_lo, mid])
+        self._vp_tail_lo = p_lo[-(w_lo - 1):].copy()
+        c_lo = np.cumsum(np.insert(p_lo, 0, 0.0, axis=0), dtype=np.float64)
+        lp_lo = ((c_lo[w_lo:] - c_lo[:-w_lo]) / float(w_lo)).astype(np.float32)
+
+        # Delay dry Mid and Side by exact 7 samples (0.146 ms) so lp_hi subtraction is zero-phase (no comb filter!)
+        mid_all = np.concatenate([self._vp_delay_mid, mid])
+        side_all = np.concatenate([self._vp_delay_side, side])
+        self._vp_delay_mid = mid_all[-d_hi:].copy()
+        self._vp_delay_side = side_all[-d_hi:].copy()
+        mid_aligned = mid_all[:-d_hi]
+        side_aligned = side_all[:-d_hi]
+
+        vocal_band = lp_hi - lp_lo
+        carved_mid = mid_aligned - float(carve_strength) * vocal_band
+        return np.column_stack([carved_mid + side_aligned, carved_mid - side_aligned]).astype(np.float32)
 
     def mix_and_limit(self, mic_stereo_f32, music_stereo_f32, music_gain):
         """Combine gained stage mic + ducked stereo music with soft-knee tanh broadcast limiting."""
@@ -552,12 +600,12 @@ class BroadcastAudioMixer:
 
         self.envelope = AutoDuckEnvelope(
             idle_volume=float(self.cfg.get("music_idle_volume", 0.34)),
-            ducked_volume=float(self.cfg.get("music_ducked_volume", 0.06)),
-            onstage_volume=float(self.cfg.get("music_onstage_volume", 0.14)),
-            onstage_speech_volume=float(self.cfg.get("music_onstage_speech_volume", 0.085)),
+            ducked_volume=float(self.cfg.get("music_ducked_volume", 0.08)),
+            onstage_volume=float(self.cfg.get("music_onstage_volume", 0.18)),
+            onstage_speech_volume=float(self.cfg.get("music_onstage_speech_volume", 0.11)),
             walkup_volume=float(self.cfg.get("music_walkup_volume", 0.24)),
             walkup_seconds=float(self.cfg.get("music_walkup_seconds", 8.0)),
-            onstage_mode=str(self.cfg.get("music_onstage_mode", "bed")),
+            onstage_mode=str(self.cfg.get("music_onstage_mode", "undertone")),
             mic_gain=float(self.cfg.get("mic_gain", 1.85)),
             voice_threshold_dbfs=float(self.cfg.get("voice_threshold_dbfs", -35.0)),
         )
@@ -581,10 +629,18 @@ class BroadcastAudioMixer:
         self._ads_proc = None
 
         self._music_mode = "auto"  # "auto" (on during standby & showtime), "on", "off"
-        self._dj_mode = str(self.cfg.get("dj_mode", "rotate"))  # "rotate", "suno", "spotify", "house", "beds"
+        self._dj_mode = str(self.cfg.get("dj_mode", "spotify"))  # "spotify", "rotate", "suno", "house", "beds"
         self._suno_block_tracks = int(self.cfg.get("suno_tracks_per_block", 3))
         self._spotify_block_tracks = int(self.cfg.get("spotify_tracks_per_block", 3))
         self._test_ad_until_epoch = 0.0
+        self._ad_interval_minutes = float(self.cfg.get("ad_interval_minutes", 30.0))
+        self._next_scheduled_ad_mono = (
+            time.monotonic() + self._ad_interval_minutes * 60.0
+            if self._ad_interval_minutes > 0.0
+            else 0.0
+        )
+        self._scheduled_ad_active = False
+        self._ad_now_seq = 0
         self._mute_mic_in_privacy = bool(self.cfg.get("mute_mic_in_privacy", False))
         self._skip_seq = 0
         self._ad_skip_seq = 0
@@ -650,6 +706,10 @@ class BroadcastAudioMixer:
                         self.envelope.ducked_volume = float(am["ducked_volume"])
                     if "onstage_volume" in am:
                         self.envelope.onstage_volume = float(am["onstage_volume"])
+                    if "onstage_speech_volume" in am:
+                        self.envelope.onstage_speech_volume = float(am["onstage_speech_volume"])
+                    if "onstage_mode" in am and am["onstage_mode"] in ("undertone", "bed", "walkup"):
+                        self.envelope.onstage_mode = str(am["onstage_mode"])
                     if "mic_gain" in am:
                         self.envelope.mic_gain = float(am["mic_gain"])
                     if "voice_threshold_dbfs" in am:
@@ -668,7 +728,11 @@ class BroadcastAudioMixer:
                 self._music_mode = mode
             if "idle_volume" in m_cfg:
                 self.envelope.idle_volume = max(0.0, min(1.0, float(m_cfg["idle_volume"])))
-            if "onstage_mode" in m_cfg and m_cfg["onstage_mode"] in ("bed", "walkup"):
+            if "onstage_volume" in m_cfg:
+                self.envelope.onstage_volume = max(0.0, min(1.0, float(m_cfg["onstage_volume"])))
+            if "onstage_speech_volume" in m_cfg:
+                self.envelope.onstage_speech_volume = max(0.0, min(1.0, float(m_cfg["onstage_speech_volume"])))
+            if "onstage_mode" in m_cfg and m_cfg["onstage_mode"] in ("undertone", "bed", "walkup"):
                 self.envelope.onstage_mode = m_cfg["onstage_mode"]
             new_skip = int(m_cfg.get("skip_seq", 0))
             if new_skip != self._skip_seq:
@@ -685,6 +749,18 @@ class BroadcastAudioMixer:
             if "spotify_tracks" in dj_cfg:
                 self._spotify_block_tracks = max(1, int(dj_cfg["spotify_tracks"]))
             self._test_ad_until_epoch = float(dj_cfg.get("test_ad_until_epoch", 0.0) or 0.0)
+            if "ad_interval_minutes" in dj_cfg:
+                new_iv = max(0.0, float(dj_cfg.get("ad_interval_minutes", 0.0) or 0.0))
+                if abs(new_iv - self._ad_interval_minutes) > 1e-3:
+                    self._ad_interval_minutes = new_iv
+                    self._next_scheduled_ad_mono = (now_mono + new_iv * 60.0) if new_iv > 0.0 else 0.0
+            new_ad_now = int(dj_cfg.get("ad_now_seq", 0))
+            if new_ad_now != self._ad_now_seq:
+                if self._ad_now_seq != 0 or new_ad_now > 0:
+                    # Only trigger immediately when ad_now_seq advances after startup, or if explicitly requested now
+                    if self._last_mpris_poll > 0.0:
+                        self._scheduled_ad_active = True
+                self._ad_now_seq = new_ad_now
             new_ad_skip = int(dj_cfg.get("ad_skip_seq", 0))
             if new_ad_skip != self._ad_skip_seq:
                 self._ad_skip_seq = new_ad_skip
@@ -717,10 +793,30 @@ class BroadcastAudioMixer:
             except Exception:
                 self._radio_decision = box2_radio.TrackDecision(action="idle", reason="mpris_err")
 
+        cur_view = self.view_getter()
+        is_onstage_now = bool(self.onstage_getter()) if cur_view == "stage" else False
+        if (
+            self._ad_interval_minutes > 0.0
+            and self._music_desired_now
+            and not self._scheduled_ad_active
+            and self._next_scheduled_ad_mono > 0.0
+            and now_mono >= self._next_scheduled_ad_mono
+        ):
+            # Comedian-first guard: never interrupt a live performer on stage; wait until between sets / standby
+            if not is_onstage_now:
+                if self._list_tracks(self.ads_dir):
+                    self._scheduled_ad_active = True
+                else:
+                    self._next_scheduled_ad_mono = now_mono + self._ad_interval_minutes * 60.0
+
         test_ad_now = time.time() < self._test_ad_until_epoch
         self._ad_swap_desired_now = bool(
             self._music_desired_now
-            and (test_ad_now or self._radio_decision.action in ("ad_break_swap", "dmca_shield_swap"))
+            and (
+                test_ad_now
+                or self._scheduled_ad_active
+                or self._radio_decision.action in ("ad_break_swap", "dmca_shield_swap")
+            )
         )
 
     @staticmethod
@@ -850,6 +946,8 @@ class BroadcastAudioMixer:
             ad_idx = (ad_idx + 1) % max(1, len(ads))
             self._current_ad_track = ad_path.stem
             local_skip = self._ad_skip_seq
+            was_scheduled_spot = bool(self._scheduled_ad_active)
+            finished_cleanly = False
 
             cmd = [
                 FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error",
@@ -870,11 +968,22 @@ class BroadcastAudioMixer:
                         continue
                     buf = proc.stdout.read(self.CHUNK_BYTES)
                     if not buf:
+                        finished_cleanly = True
                         break
                     if len(buf) < self.CHUNK_BYTES:
                         buf = buf + b"\x00" * (self.CHUNK_BYTES - len(buf))
                     with self._ads_lock:
                         self._ads_queue.append(buf)
+                if was_scheduled_spot and (finished_cleanly or local_skip != self._ad_skip_seq):
+                    # Wait for buffered chunks of this single scheduled spot to finish playing out before returning to music
+                    while not self._stop_event.is_set() and local_skip == self._ad_skip_seq:
+                        with self._ads_lock:
+                            if not self._ads_queue:
+                                break
+                        time.sleep(0.04)
+                    self._scheduled_ad_active = False
+                    if self._ad_interval_minutes > 0.0:
+                        self._next_scheduled_ad_mono = time.monotonic() + self._ad_interval_minutes * 60.0
             except Exception as exc:
                 log(f"Audio mixer ads reader warning: {exc}")
             finally:
@@ -1144,6 +1253,9 @@ class BroadcastAudioMixer:
 
                 if np is not None:
                     m_f32 = (np.frombuffer(music_raw, dtype=np.int16).reshape(-1, 2).astype(np.float32) / 32768.0) if music_raw is not None else zero_stereo
+                    if is_onstage and self.envelope.onstage_mode == "undertone" and not ad_swap_active and music_raw is not None:
+                        # Carve center vocal frequency pocket (~300-3400 Hz) so comedian's mic cuts cleanly over Spotify song
+                        m_f32 = self.envelope.apply_undertone_vocal_pocket(m_f32)
                     b_f32 = (np.frombuffer(bed_raw, dtype=np.int16).reshape(-1, 2).astype(np.float32) / 32768.0) if bed_raw is not None else zero_stereo
                     if bed_raw is not None and music_raw is not None and 0.001 < self._bed_mix_ratio < 0.999:
                         # Equal-power crossfade between vocal YurrMom radio and vocal-carved Stage Attention Bed
@@ -1165,6 +1277,11 @@ class BroadcastAudioMixer:
                 else:
                     out_bytes = mic_raw if (mic_raw and not mute_mic) else zero_bytes
 
+                next_ad_s = (
+                    max(0, int(round(self._next_scheduled_ad_mono - now_mono)))
+                    if (self._ad_interval_minutes > 0.0 and self._next_scheduled_ad_mono > 0.0)
+                    else None
+                )
                 self.stats.update(
                     mic_dbfs=round(mic_dbfs, 1),
                     voice_ducking=bool(voice_active),
@@ -1172,6 +1289,8 @@ class BroadcastAudioMixer:
                     dj_mode=self._dj_mode,
                     audio_source=active_source if self._music_desired_now else "off",
                     ad_shield_active=bool(ad_swap_active),
+                    ad_interval_minutes=self._ad_interval_minutes,
+                    next_scheduled_ad_in_s=next_ad_s,
                     music_playing=bool(music_gain > 0.005 and any_prog_chunk),
                     music_track=active_track_label if self._music_desired_now else "",
                     now_playing_banner=banner_str if self._music_desired_now else "",
@@ -3508,15 +3627,21 @@ def _handle_music_cli(args):
         m_cfg['skip_seq'] = int(m_cfg.get('skip_seq', 0)) + 1
         update_state(music=m_cfg)
         print("Skipping to next track in playlist.")
-    elif sub in ('bed', 'walkup'):
+    elif sub in ('undertone', 'bed', 'walkup'):
         m_cfg['onstage_mode'] = sub
         update_state(music=m_cfg)
-        desc = (
-            "subtle background bed during onstage sets (never swells during pauses)"
-            if sub == 'bed'
-            else "8-second walk-up intro when taking stage, then fades to 0.0 for dry set"
-        )
+        desc = {
+            'undertone': "live Spotify / YurrMom.Com songs stay audible underneath comedian (0.18 gain, 0.11 + vocal-pocket EQ when speaking)",
+            'bed': "crossfades into instrumental Stage Groove bed during onstage sets",
+            'walkup': "8-second walk-up intro when taking stage, then fades to 0.0 for dry set",
+        }[sub]
         print(f"Onstage music mix mode set to '{sub}': {desc}.")
+    elif sub in ('onstage-vol', 'undertone-vol') and len(args) >= 2:
+        vol = max(0.0, min(1.0, float(args[1])))
+        m_cfg['onstage_volume'] = vol
+        m_cfg['onstage_speech_volume'] = round(vol * 0.62, 3)
+        update_state(music=m_cfg)
+        print(f"Onstage undertone volume set to {vol:.2f} (tucks to {m_cfg['onstage_speech_volume']:.2f} during speech).")
     elif sub in ('vol', 'volume') and len(args) >= 2:
         vol = max(0.0, min(1.0, float(args[1])))
         m_cfg['idle_volume'] = vol
@@ -3562,6 +3687,19 @@ def _handle_dj_cli(args):
         dj_cfg['mode'] = sub
         update_state(dj=dj_cfg)
         print(f"DJ source pinned to '{sub}'.")
+    elif sub in ('ad-every', 'ads-every', 'ad-schedule') and len(args) >= 2:
+        raw_v = str(args[1]).strip().lower()
+        mins = 0.0 if raw_v in ('0', 'off', 'none', 'disable', 'disabled') else max(1.0, float(raw_v))
+        dj_cfg['ad_interval_minutes'] = mins
+        update_state(dj=dj_cfg)
+        if mins <= 0.0:
+            print("Scheduled house ads OFF (only manual `dj ad-now` or ad-shield swaps will play).")
+        else:
+            print(f"Scheduled house ads ON: 1 promo from {DEFAULT_ADS_DIR} every {mins:g} min (auto-deferred if a comedian is on stage).")
+    elif sub in ('ad-now', 'run-ad', 'play-ad'):
+        dj_cfg['ad_now_seq'] = int(dj_cfg.get('ad_now_seq', 0)) + 1
+        update_state(dj=dj_cfg)
+        print(f"Queued immediate house promo spot from {DEFAULT_ADS_DIR}!")
     elif sub in ('test-ad', 'ad-test'):
         secs = float(args[1]) if len(args) >= 2 else 15.0
         dj_cfg['test_ad_until_epoch'] = round(time.time() + max(3.0, secs), 2)
@@ -3570,14 +3708,20 @@ def _handle_dj_cli(args):
     elif sub == 'skip-ad':
         dj_cfg['ad_skip_seq'] = int(dj_cfg.get('ad_skip_seq', 0)) + 1
         update_state(dj=dj_cfg)
-        print("Skipped to next promo spot in box2-ads.")
+        print("Skipped current promo spot in box2-ads.")
     else:
         ctrl = box2_radio.MprisRadioController()
         players = ctrl.list_players()
+        ls_ready, _ = box2_radio.poll_librespot_status()
         ads = sorted([p.name for p in DEFAULT_ADS_DIR.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXTS]) if DEFAULT_ADS_DIR.exists() else []
         print(json.dumps({
             "dj_config": dj_cfg,
             "pipewire_bus_ready": box2_radio.ensure_pipewire_dj_bus(),
+            "spotify_connect_speaker": {
+                "device_name": "BOX 2 Stream",
+                "daemon_listening": ls_ready,
+                "how_to_connect": "Open Spotify on your phone or Mac -> Devices icon -> select 'BOX 2 Stream'",
+            },
             "spotify_artist_url": box2_radio.SPOTIFY_ARTIST_URL,
             "suno_discover_url": box2_radio.SUNO_DISCOVER_URL,
             "detected_mpris_players": {
