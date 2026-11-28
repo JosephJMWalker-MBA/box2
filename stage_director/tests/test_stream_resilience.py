@@ -696,6 +696,144 @@ class StreamResilienceTests(unittest.TestCase):
             self.assertIn("I'm going to talk to other animals.", srt_txt)
             self.assertIn("00:00:06,300 --> 00:00:08,800", srt_txt)
 
+    def test_p1_signal_integrity_and_fail_closed_audio_authority(self):
+        """Verifies P1 room-bound audio provenance (rejecting wrong rooms/stalls) and #I visual quality checks."""
+        from stage_director.signal_integrity import (
+            AudioAuthorityPolicy,
+            SignalIntegrityMonitor,
+            discover_authorized_usb_mic,
+            measure_visual_quality,
+            verify_audio_provenance,
+        )
+
+        pol = AudioAuthorityPolicy(
+            room_id="box2_stage",
+            preferred_usb_alsa_match="StageMic",
+            authorized_nvr_mac="ec:71:db:bb:69:56",
+            authorized_nvr_channel=0,
+            expected_osd_name="Camera1",
+            mic_stall_timeout_s=2.5,
+        )
+
+        # 1. Verified CH 0 stage mic -> AUTHORIZED
+        v_ok = verify_audio_provenance(
+            pol, source_kind="nvr_channel", source_id="nvr://10.0.0.6/ch0",
+            nvr_mac="ec:71:db:bb:69:56", nvr_channel=0, osd_name="Camera1", last_audio_age_s=0.1,
+        )
+        self.assertTrue(v_ok.authorized)
+        self.assertFalse(v_ok.fail_closed)
+
+        # 2. Reception desk (CH 5) or Parking Lot (CH 1) -> strictly REJECTED (fail-closed!)
+        for wrong_ch, wrong_osd in ((5, "reception 1"), (1, "parking lot center"), (4, "recording booth 1")):
+            v_bad = verify_audio_provenance(
+                pol, source_kind="nvr_channel", source_id=f"nvr://10.0.0.6/ch{wrong_ch}",
+                nvr_mac="ec:71:db:bb:69:56", nvr_channel=wrong_ch, osd_name=wrong_osd, last_audio_age_s=0.1,
+            )
+            self.assertFalse(v_bad.authorized)
+            self.assertTrue(v_bad.fail_closed)
+            self.assertEqual(v_bad.status_code, "WRONG_ROOM_REJECTED")
+
+        # 3. Disconnected / stalled stage mic (>2.5s) -> fails closed as STAGE_MIC_INTERRUPTED
+        v_stall = verify_audio_provenance(
+            pol, source_kind="nvr_channel", source_id="nvr://10.0.0.6/ch0",
+            nvr_mac="ec:71:db:bb:69:56", nvr_channel=0, osd_name="Camera1", last_audio_age_s=3.4,
+        )
+        self.assertFalse(v_stall.authorized)
+        self.assertTrue(v_stall.fail_closed)
+        self.assertEqual(v_stall.status_code, "STAGE_MIC_INTERRUPTED")
+
+        # 4. Dedicated USB wireless stage receiver auto-discovered while ignoring Jetson Tegra APE
+        alsa_txt = (
+            " 0 [HDA            ]: tegra-hda - NVIDIA Jetson Orin Nano HDA\n"
+            " 1 [APE            ]: tegra-ape - NVIDIA Jetson Orin Nano APE\n"
+            " 2 [StageMic       ]: USB-Audio - Wireless StageMic Receiver\n"
+        )
+        usb_found = discover_authorized_usb_mic(alsa_txt, "StageMic")
+        self.assertEqual(usb_found[0], 2)
+
+        # 5. #I Monitor + Laplacian sharpness & face-vs-jukebox exposure report
+        mon = SignalIntegrityMonitor(policy=pol)
+        snap_err = mon.evaluate(
+            now_epoch=1000.0, now_mono=10.0, camera_verified=True, camera_source_id="ch0",
+            video_fresh=True, audio_verdict=v_stall,
+        )
+        self.assertEqual(snap_err.status_code, "STAGE_MIC_INTERRUPTED")
+        self.assertEqual(snap_err.mic_interruption_count, 1)
+
+        if HAS_NUMPY:
+            # Dark stage face (luma=25) + bright neon jukebox on right (luma=230) -> flags underexposed_face!
+            img = np.full((360, 640), 25, dtype=np.uint8)
+            img[170:320, 470:560] = 230
+            vq = measure_visual_quality(img)
+            self.assertTrue(vq.underexposed_face)
+            self.assertFalse(vq.exposure_balanced)
+
+    def test_p2_autonomous_shot_director_and_slew_concealer(self):
+        """Verifies non-metronomic 01 Wide -> 02 Medium -> 03 Close-Up -> Pause/Movement -> Medium & #C conceal."""
+        from stage_director.cinematography import OpticalSlewConcealer, ShotDirector, ShotType, ShotVocabularyConfig
+        from stage_director.geometry import BoundingBox
+
+        cfg = ShotVocabularyConfig(
+            entrance_wide_seconds=6.0,
+            min_medium_dwell_seconds=16.0,
+            target_closeup_pause_exit_seconds=8.0,
+            max_closeup_seconds=14.0,
+            stationary_confirm_seconds=4.0,
+            optical_zoom_wide_pos=5,
+            optical_zoom_medium_pos=10,
+            optical_zoom_closeup_pos=14,
+        )
+        sd = ShotDirector(config=cfg, canvas_width=640)
+        face = BoundingBox(280, 110, 36, 36)
+
+        # 01 Entrance -> starts in ESTABLISHING_WIDE (optical pos=5)
+        d0 = sd.step(monotonic_seconds=1.0, tracking_state="tracking", face_box=face, is_speaking=True)
+        self.assertEqual(d0.shot, ShotType.ESTABLISHING_WIDE)
+        self.assertEqual(d0.desired_optical_zoom_pos, 5)
+
+        # After 6.5s entrance -> transitions to 02 MEDIUM and requests optical move to pos=10!
+        d_med = sd.step(monotonic_seconds=7.6, tracking_state="tracking", face_box=face, is_speaking=True)
+        self.assertEqual(d_med.shot, ShotType.MEDIUM)
+        self.assertEqual(d_med.desired_optical_zoom_pos, 10)
+        self.assertTrue(d_med.request_optical_move)
+
+        # Stationary expressive delivery for 17s in Medium -> transitions to 03 CLOSE_UP (pos=14)!
+        t = 8.0
+        for _ in range(34):
+            t += 0.5
+            d_cu = sd.step(monotonic_seconds=t, tracking_state="tracking", face_box=face, is_speaking=True, recent_speech_age_s=0.2)
+        self.assertEqual(d_cu.shot, ShotType.CLOSE_UP)
+        self.assertEqual(d_cu.desired_optical_zoom_pos, 14)
+
+        # Hold Close-Up while mid-sentence at +6s, then cleanly return to Medium on natural pause at +8.5s!
+        d_mid_joke = sd.step(monotonic_seconds=t + 6.0, tracking_state="tracking", face_box=face, is_speaking=True, utterance_just_committed=False)
+        self.assertEqual(d_mid_joke.shot, ShotType.CLOSE_UP)
+        d_pause = sd.step(monotonic_seconds=t + 8.5, tracking_state="tracking", face_box=face, is_speaking=False, utterance_just_committed=True)
+        self.assertEqual(d_pause.shot, ShotType.MEDIUM)
+        self.assertEqual(d_pause.desired_optical_zoom_pos, 10)
+
+        # Tracking loss -> immediate recovery to 01 ESTABLISHING_WIDE (pos=5)
+        d_lost = sd.step(monotonic_seconds=t + 12.0, tracking_state="lost", face_box=None)
+        self.assertEqual(d_lost.shot, ShotType.ESTABLISHING_WIDE)
+        self.assertEqual(d_lost.desired_optical_zoom_pos, 5)
+
+        # #C OpticalSlewConcealer holds sharp pre-slew bridge while AF is blurry, then cross-dissolves when sharp
+        if HAS_NUMPY:
+            conc = OpticalSlewConcealer(min_slew_hold_s=1.0, max_slew_conceal_s=2.5, dissolve_out_s=0.4, sharpness_floor=25.0)
+            pre = np.full((60, 80, 3), 40, dtype=np.uint8)
+            live = np.full((60, 80, 3), 200, dtype=np.uint8)
+            conc.notify_optical_move_started(pre, now_mono=50.0)
+            # At +1.2s with blurry AF (sharpness=8.0 < 25.0) -> still conceals with pre-slew bridge (40)!
+            out_blur = conc.blend_if_concealing(live, focus_sharpness=8.0, now_mono=51.2)
+            self.assertEqual(int(out_blur[0, 0, 0]), 40)
+            # At +1.4s once AF settles sharp (sharpness=48.0 >= 25.0) -> enters smooth dissolve -> settles to 200!
+            conc.blend_if_concealing(live, focus_sharpness=48.0, now_mono=51.4)
+            out_mid = conc.blend_if_concealing(live, focus_sharpness=48.0, now_mono=51.6)
+            self.assertTrue(50 < int(out_mid[0, 0, 0]) < 190)
+            out_done = conc.blend_if_concealing(live, focus_sharpness=48.0, now_mono=51.9)
+            self.assertEqual(int(out_done[0, 0, 0]), 200)
+            self.assertFalse(conc.is_active)
+
 
 if __name__ == "__main__":
     unittest.main()

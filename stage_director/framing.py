@@ -126,8 +126,16 @@ class FramingEngine:
         self._last_face_time: Optional[float] = None
         self._face_speed_x: float = 0.0
         self._smoothed_face_height: Optional[float] = None
+        self._override_face_fraction: Optional[float] = None
+        self._override_headroom_fraction: Optional[float] = None
         self._events: List[str] = []
         self.reset()
+
+    def set_shot_framing(self, target_face_fraction: Optional[float] = None,
+                         headroom_fraction: Optional[float] = None) -> None:
+        """Dynamically adjust shot scale (Wide / Medium / Close-Up) smoothed through velocity limits."""
+        self._override_face_fraction = target_face_fraction
+        self._override_headroom_fraction = headroom_fraction
 
     def reset(self, monotonic_seconds: Optional[float] = None) -> None:
         """Reset camera framing to the default safe-wide shot with optional time anchor."""
@@ -209,7 +217,9 @@ class FramingEngine:
             if (self.config.face_size_smoothing_tau > 0.0 and self._smoothed_face_height is not None)
             else face.height
         )
-        desired_h = eff_face_h / self.config.target_face_fraction
+        face_frac = self._override_face_fraction if self._override_face_fraction is not None else self.config.target_face_fraction
+        headroom_frac = self._override_headroom_fraction if self._override_headroom_fraction is not None else self.config.headroom_fraction
+        desired_h = eff_face_h / max(0.05, face_frac)
         desired_w = desired_h * (16.0 / 9.0)
 
         # 2. Pacing pullback adaptation: if performer is walking briskly, widen framing slightly
@@ -226,7 +236,7 @@ class FramingEngine:
         target_h = target_w * (9.0 / 16.0)
 
         # 4. Headroom positioning: face center at headroom_fraction from top of crop
-        target_center_y = face.center_y + (0.5 - self.config.headroom_fraction) * target_h
+        target_center_y = face.center_y + (0.5 - headroom_frac) * target_h
         target_center_x = face.center_x
 
         # 5. Canvas boundary clamping: window must never extend outside canvas

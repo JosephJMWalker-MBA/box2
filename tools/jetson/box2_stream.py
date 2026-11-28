@@ -91,6 +91,22 @@ STAGE_DIR = Path("/home/joseph1/stage-director")
 if str(STAGE_DIR) not in sys.path:
     sys.path.insert(0, str(STAGE_DIR))
 
+from stage_director.cinematography import (
+    OpticalSlewConcealer,
+    ShotDirector,
+    ShotType,
+    ShotVocabularyConfig,
+    build_stage_isp_payload,
+)
+from stage_director.signal_integrity import (
+    AudioAuthorityPolicy,
+    ProvenanceVerdict,
+    SignalIntegrityMonitor,
+    discover_authorized_usb_mic,
+    measure_visual_quality,
+    verify_audio_provenance,
+)
+
 try:
     import cv2
     import numpy as np
@@ -355,6 +371,94 @@ def nvr_goto_preset(ip, token, preset_id, channel=0, speed=32, settle_confirm=Fa
         return False
 
 
+def nvr_set_zoom_pos(ip, token, zoom_pos, channel=0):
+    """Command absolute closed-loop optical zoom position (`0..34`) on Reolink RLC-823A."""
+    if not ip or not token:
+        return False
+    pos_clamped = max(0, min(34, int(zoom_pos)))
+    body = [{'cmd': 'StartZoomFocus', 'action': 0, 'param': {'ZoomFocus': {'channel': int(channel), 'op': 'ZoomPos', 'pos': pos_clamped}}}]
+    try:
+        res = nvr_call(ip, f'cmd=StartZoomFocus&token={token}', body, timeout=5)
+        return res.get('code') == 0
+    except Exception:
+        return False
+
+
+def nvr_get_channel_osd(ip, token, channel=0):
+    """Return NVR channel OSD room/camera name for P1/#I provenance verification."""
+    if not ip or not token:
+        return None
+    try:
+        res = nvr_call(ip, f'cmd=GetOsd&token={token}', [{'cmd': 'GetOsd', 'action': 0, 'param': {'channel': int(channel)}}], timeout=4)
+        if res.get('code') == 0:
+            return res.get('value', {}).get('Osd', {}).get('osdChannel', {}).get('name')
+    except Exception:
+        pass
+    return None
+
+
+def nvr_configure_stage_optics(ip, token, channel=0, face_luma=70.0, jukebox_luma=190.0):
+    """Enforce exclusive PTZ ownership (`aiTrack=0`) and face-optimized ISP (`60HZ` + DRC against jukebox glare)."""
+    if not ip or not token:
+        return False
+    ok_any = False
+    try:
+        # 1. Assert exclusive PTZ control: disable onboard firmware AI auto-tracking if enabled
+        ai_res = nvr_call(ip, f'cmd=GetAiCfg&token={token}', [{'cmd': 'GetAiCfg', 'action': 0, 'param': {'channel': int(channel)}}], timeout=4)
+        ai_val = ai_res.get('value', {})
+        if ai_val.get('aiTrack', 0) != 0:
+            ai_off = dict(ai_val)
+            ai_off['channel'] = int(channel)
+            ai_off['aiTrack'] = 0
+            nvr_call(ip, f'cmd=SetAiCfg&token={token}', [{'cmd': 'SetAiCfg', 'action': 0, 'param': ai_off}], timeout=4)
+        ok_any = True
+    except Exception:
+        pass
+
+    try:
+        # 2. Optimize ISP exposure for stage skin tones rather than the illuminated jukebox
+        isp_res = nvr_call(ip, f'cmd=GetIsp&token={token}', [{'cmd': 'GetIsp', 'action': 0, 'param': {'channel': int(channel)}}], timeout=4)
+        cur_isp = isp_res.get('value', {}).get('Isp')
+        if isinstance(cur_isp, dict):
+            target_isp = dict(cur_isp)
+            patch = build_stage_isp_payload(channel=channel, face_luma=face_luma, jukebox_luma=jukebox_luma)['Isp']
+            target_isp['antiFlicker'] = patch['antiFlicker']
+            target_isp['backLight'] = patch['backLight']
+            target_isp['drc'] = patch['drc']
+            r = nvr_call(ip, f'cmd=SetIsp&token={token}', [{'cmd': 'SetIsp', 'action': 0, 'param': {'Isp': target_isp}}], timeout=5)
+            ok_any = ok_any or (r.get('code') == 0)
+    except Exception:
+        pass
+    return ok_any
+
+
+def probe_stage_video_source(ip, token, cfg):
+    """Auto-detect native 4K RTSP main stream once NVR firmware/password supports it; fallback cleanly to FLV."""
+    fallback = flv_url(ip, token, cfg)
+    if not ip or not cfg.get('prefer_4k_ingest', True) or not os.path.exists(FFPROBE):
+        return fallback, False
+    ch = int(cfg.get('nvr_channel', 0)) + 1
+    u = urllib.parse.quote(str(cfg.get('nvr_user', '')), safe='')
+    p = urllib.parse.quote(str(cfg.get('nvr_password', '')), safe='')
+    for suffix in (f'Preview_{ch:02d}_main', f'/h265Preview_{ch:02d}_main', f'h265Preview_{ch:02d}_main'):
+        cand = f"rtsp://{u}:{p}@{ip}:554/{suffix.lstrip('/')}" if not suffix.startswith('/') else f"rtsp://{u}:{p}@{ip}:554/{suffix}"
+        try:
+            pr = subprocess.run(
+                [FFPROBE, '-rtsp_transport', 'tcp', '-probesize', '1000000', '-analyzeduration', '1000000',
+                 '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', cand],
+                capture_output=True, text=True, timeout=2.5,
+            )
+            if pr.returncode == 0 and pr.stdout.strip():
+                meta = json.loads(pr.stdout)
+                streams = meta.get('streams') or []
+                if streams and int(streams[0].get('width', 0)) >= 2560:
+                    log(f"Stage Director P3: Unlocked native {streams[0]['width']}x{streams[0]['height']} main stream -> upgrading broadcast to 1080p30 @ 6 Mbps!")
+                    return cand, True
+        except Exception:
+            continue
+    return fallback, False
+
+
 def flv_url(ip, token, cfg):
     return f"http://{ip}/flv?port=1935&app=bcs&stream=channel{cfg['nvr_channel']}_{cfg['nvr_stream']}.bcs&token={token}"
 
@@ -613,6 +717,31 @@ class BroadcastAudioMixer:
         self.secrets = secrets or []
         self.ticker_path = ticker_path
 
+        # P1 Audio Source Authority: pin strictly to Box 2 Stage (auto-prefer USB stage receiver; fail-closed on CH 0)
+        self.audio_policy = AudioAuthorityPolicy(
+            room_id="box2_stage",
+            preferred_usb_alsa_match=self.cfg.get("usb_stage_mic_match", "StageMic"),
+            authorized_nvr_mac=str(self.cfg.get("nvr_mac", "ec:71:db:bb:69:56")),
+            authorized_nvr_channel=int(self.cfg.get("nvr_channel", 0)),
+            expected_osd_name=str(self.cfg.get("expected_stage_osd", "Camera1")),
+            mic_stall_timeout_s=float(self.cfg.get("mic_stall_timeout_s", 3.0)),
+        )
+        self._verified_nvr_mac = mac_of(self.ip) if self.ip else self.audio_policy.authorized_nvr_mac
+        self._verified_osd_name = str(self.cfg.get("verified_stage_osd", self.audio_policy.expected_osd_name))
+        self._active_mic_kind = "nvr_channel"
+        self._active_mic_id = f"nvr://{self.ip or 'local'}/ch{self.audio_policy.authorized_nvr_channel}"
+        self._last_mic_chunk_mono = time.monotonic()
+        self._raw_pre_mix_dbfs = -90.0
+        self.mic_verdict = verify_audio_provenance(
+            self.audio_policy,
+            source_kind="nvr_channel",
+            source_id=self._active_mic_id,
+            nvr_mac=self._verified_nvr_mac,
+            nvr_channel=self.audio_policy.authorized_nvr_channel,
+            osd_name=self._verified_osd_name,
+            last_audio_age_s=0.0,
+        )
+
         self.music_dir = Path(self.cfg.get("music_dir", str(DEFAULT_MUSIC_DIR)))
         self.music_dir.mkdir(parents=True, exist_ok=True)
         self.stage_beds_dir = Path(self.cfg.get("stage_beds_dir", str(DEFAULT_STAGE_BEDS_DIR)))
@@ -865,18 +994,63 @@ class BroadcastAudioMixer:
                     pass
 
     def _mic_reader_worker(self):
+        """P1 Authoritative Stage Microphone Reader.
+
+        1. Auto-prefers a dedicated USB/XLR wireless stage receiver plugged into the Jetson (`usb_stage_mic`).
+        2. Otherwise binds strictly to verified NVR `CH 0` (`Box 2 Stage`, never `CH 1-7` other rooms).
+        3. Fails closed if provenance fails or audio disconnects (`STAGE_MIC_INTERRUPTED`).
+        """
         use_rtsp = bool(self.ip and self.cfg.get("nvr_user") and self.cfg.get("nvr_password"))
+        auth_ch = int(self.audio_policy.authorized_nvr_channel)
         fail_streak = 0
         while not self._stop_event.is_set():
             src = None
             input_args = []
-            if use_rtsp and fail_streak < 3:
-                src = rtsp_url_ch(self.ip, self.cfg)
-                input_args = ["-rtsp_transport", "tcp", "-timeout", "8000000", "-i", src]
-            elif self.cam0_url_getter:
-                src = self.cam0_url_getter()
-                if src:
-                    input_args = ["-rw_timeout", "10000000", "-i", src]
+
+            # 1. Check for dedicated USB stage microphone receiver on Jetson ALSA bus
+            alsa_cards = ""
+            if os.path.exists("/proc/asound/cards"):
+                try:
+                    alsa_cards = Path("/proc/asound/cards").read_text()
+                except OSError:
+                    alsa_cards = ""
+            usb_match = discover_authorized_usb_mic(alsa_cards, self.audio_policy.preferred_usb_alsa_match)
+            if usb_match is not None:
+                card_idx, card_desc = usb_match
+                self._active_mic_kind = "usb_stage_mic"
+                self._active_mic_id = f"alsa:hw:{card_idx},0 ({card_desc})"
+                src = f"hw:{card_idx},0"
+                input_args = ["-f", "alsa", "-i", src]
+            else:
+                # 2. Strict NVR CH 0 stage provenance check (never substitute CH 1-7)
+                self._active_mic_kind = "nvr_channel"
+                self._active_mic_id = f"nvr://{self.ip or 'local'}/ch{auth_ch}"
+                if self.ip:
+                    live_mac = mac_of(self.ip)
+                    if live_mac:
+                        self._verified_nvr_mac = live_mac
+                pre_check = verify_audio_provenance(
+                    self.audio_policy,
+                    source_kind="nvr_channel",
+                    source_id=self._active_mic_id,
+                    nvr_mac=self._verified_nvr_mac,
+                    nvr_channel=auth_ch,
+                    osd_name=self._verified_osd_name,
+                    last_audio_age_s=0.0,
+                )
+                if not pre_check.authorized:
+                    self.mic_verdict = pre_check
+                    log(f"Stage Director P1 FAIL-CLOSED: rejected audio source ({pre_check.reason})")
+                    time.sleep(2.0)
+                    continue
+                if use_rtsp and fail_streak < 3:
+                    src = rtsp_url_ch(self.ip, self.cfg, channel=auth_ch, stream="sub")
+                    input_args = ["-rtsp_transport", "tcp", "-timeout", "8000000", "-i", src]
+                elif self.cam0_url_getter and auth_ch == 0:
+                    src = self.cam0_url_getter()
+                    if src:
+                        input_args = ["-rw_timeout", "10000000", "-i", src]
+
             if not src or not input_args:
                 time.sleep(1.5)
                 continue
@@ -897,6 +1071,7 @@ class BroadcastAudioMixer:
                         break
                     got_audio = True
                     fail_streak = 0
+                    self._last_mic_chunk_mono = time.monotonic()
                     with self._mic_lock:
                         self._mic_queue.append(buf)
             except Exception as exc:
@@ -1189,6 +1364,21 @@ class BroadcastAudioMixer:
                 with self._mic_lock:
                     mic_raw = self._mic_queue.popleft() if self._mic_queue else None
 
+                # P1 Fail-Closed Audio Provenance Check on every mixer tick
+                mic_age_s = max(0.0, now_mono - self._last_mic_chunk_mono)
+                self.mic_verdict = verify_audio_provenance(
+                    self.audio_policy,
+                    source_kind=self._active_mic_kind,
+                    source_id=self._active_mic_id,
+                    nvr_mac=self._verified_nvr_mac,
+                    nvr_channel=self.audio_policy.authorized_nvr_channel,
+                    osd_name=self._verified_osd_name,
+                    last_audio_age_s=mic_age_s,
+                )
+                if not self.mic_verdict.authorized:
+                    # Fail-closed: never feed unverified or stalled audio to broadcast or ASR!
+                    mic_raw = None
+
                 cur_view = self.view_getter()
                 is_onstage = bool(self.onstage_getter()) if cur_view == "stage" else False
 
@@ -1197,7 +1387,9 @@ class BroadcastAudioMixer:
                 # - 9 PM - 2 AM (`stage`): gated down to `offstage_mic_scale` (default 0.0) whenever nobody is on stage
                 #   so ambient desk typing, speakers, or across-the-room voices never bleed onto Twitch; ramps smoothly
                 #   in 80 ms to 1.0 the instant a performer steps onto the stage.
-                if cur_view == "privacy":
+                if not self.mic_verdict.authorized:
+                    target_mic_gate = 0.0
+                elif cur_view == "privacy":
                     target_mic_gate = 0.0 if self._mute_mic_in_privacy else 0.12
                 elif is_onstage or not self._gate_mic_offstage:
                     target_mic_gate = 1.0
@@ -1212,18 +1404,25 @@ class BroadcastAudioMixer:
                 if self._mic_stage_gate < 0.0005 and target_mic_gate == 0.0:
                     self._mic_stage_gate = 0.0
 
-                if mic_raw is not None and self._mic_stage_gate > 0.0005 and np is not None:
+                if mic_raw is not None and np is not None:
                     mic_i16 = np.frombuffer(mic_raw, dtype=np.int16).reshape(-1, 2)
                     mic_f32 = mic_i16.astype(np.float32) / 32768.0
                     mono = 0.5 * (mic_f32[:, 0] + mic_f32[:, 1])
                     mono_hp = self.envelope.highpass_rumble_cut(mono)
-                    # Broadcast stereo vocal cleanup: apply rumble cut to both channels
-                    rumble = (mono - mono_hp)[:, None]
-                    mic_clean = (mic_f32 - rumble) * self._mic_stage_gate
-                    mic_dbfs = self.envelope.compute_rms_dbfs(mono_hp * self._mic_stage_gate)
-                    if self.caption_engine is not None and is_onstage:
-                        self.caption_engine.push_mic_pcm48_mono(mono_hp * self.envelope.mic_gain, is_onstage=True)
+                    self._raw_pre_mix_dbfs = self.envelope.compute_rms_dbfs(mono_hp)
+                    if self._mic_stage_gate > 0.0005:
+                        # Broadcast stereo vocal cleanup: apply rumble cut to both channels
+                        rumble = (mono - mono_hp)[:, None]
+                        mic_clean = (mic_f32 - rumble) * self._mic_stage_gate
+                        mic_dbfs = self.envelope.compute_rms_dbfs(mono_hp * self._mic_stage_gate)
+                        # Strictly pre-mix, provenance-verified speech routed to ASR before any music track!
+                        if self.caption_engine is not None and is_onstage and self.mic_verdict.authorized:
+                            self.caption_engine.push_mic_pcm48_mono(mono_hp * self.envelope.mic_gain, is_onstage=True)
+                    else:
+                        mic_clean = zero_stereo
+                        mic_dbfs = -90.0
                 else:
+                    self._raw_pre_mix_dbfs = -90.0
                     mic_clean = zero_stereo
                     mic_dbfs = -90.0
 
@@ -1339,6 +1538,8 @@ class BroadcastAudioMixer:
                 self.stats.update(
                     mic_dbfs=round(mic_dbfs, 1),
                     mic_gated=bool(self._mic_stage_gate < 0.05),
+                    mic_authority=self.mic_verdict.status_code,
+                    mic_source_id=self.mic_verdict.source_id,
                     voice_ducking=bool(voice_active),
                     music_mode=self._music_mode,
                     dj_mode=self._dj_mode,
@@ -2944,10 +3145,26 @@ class DirectorStream:
         self.token_lock = threading.Lock()
         self.last_token_renew = time.monotonic()
 
-        self.out_w = cfg.get("output_width", 1280)
-        self.out_h = cfg.get("output_height", 720)
-        self.fps = cfg.get("output_fps", 10.0)
-        self.top_matte_h = cfg.get("top_matte_h", int(110 * (self.out_h / 720.0)))
+        # P1/P3: Verify stage channel OSD provenance & auto-probe native 4K RTSP stream if unlocked on NVR
+        self._high_res_rtsp_url = None
+        self._high_res_ingest = False
+        if self.ip and self.token:
+            osd_live = nvr_get_channel_osd(self.ip, self.token, channel=int(cfg.get("nvr_channel", 0)))
+            if osd_live:
+                cfg = dict(cfg)
+                cfg["verified_stage_osd"] = osd_live
+            probed_url, is_hi = probe_stage_video_source(self.ip, self.token, cfg)
+            if is_hi:
+                self._high_res_rtsp_url = probed_url
+                self._high_res_ingest = True
+
+        default_out_w = 1920 if self._high_res_ingest else 1280
+        default_out_h = 1080 if self._high_res_ingest else 720
+        self.out_w = int(cfg.get("output_width", default_out_w))
+        self.out_h = int(cfg.get("output_height", default_out_h))
+        self.fps = cfg.get("output_fps", 15.0 if self._high_res_ingest else 10.0)
+        out_scale = self.out_h / 720.0
+        self.top_matte_h = cfg.get("top_matte_h", int(round(110 * out_scale)))
         refresh_hours = effective_refresh_hours(cfg)
         self.ticker = TickerOverlay(config_path="/home/joseph1/box2-stream/ticker.json", top_h=self.top_matte_h, refresh_hours=refresh_hours)
         self.countdown_overlay = ShowtimeCountdownOverlay(
@@ -2960,9 +3177,9 @@ class DirectorStream:
         self.chessheat_overlay = box2_chessheat.ChessHeatLiveOverlay(
             config_path="/home/joseph1/box2-stream/ticker.json",
             card_w=self.countdown_overlay.card_w,
-            card_h=362,
+            card_h=int(round(362 * out_scale)),
             x=self.countdown_overlay.x,
-            y=148,
+            y=int(round(148 * out_scale)),
         )
         self.wall_overlay = WallOverlay(config_path="/home/joseph1/box2-stream/ticker.json", base_w=self.out_w, base_h=self.out_h)
         self.caption_engine = box2_captions.LiveCaptionEngine(
@@ -3078,7 +3295,7 @@ class DirectorStream:
         self.audio_mixer = BroadcastAudioMixer(
             cfg=cfg,
             ip=self.ip,
-            cam0_url_getter=(self.get_cam0_url if self.ip else (lambda: source)),
+            cam0_url_getter=(self.get_cam0_flv_url if self.ip else (lambda: source)),
             view_getter=(lambda: self.current_view_mode),
             policy_getter=(lambda: self._current_policy),
             onstage_getter=(lambda: self._is_performer_framed),
@@ -3086,7 +3303,29 @@ class DirectorStream:
             secrets=secrets,
         )
 
-        bitrate = cfg.get("bitrate", "2500k")
+        # P2/#C/#I: Autonomous Shot Director, Optical Slew Concealer & Signal Integrity Monitor
+        shot_cfg = ShotVocabularyConfig(
+            enable_live_optical_shot_moves=bool(cfg.get("enable_live_optical_shot_moves", True)),
+            optical_zoom_wide_pos=int(cfg.get("optical_zoom_wide_pos", 5)),
+            optical_zoom_medium_pos=int(cfg.get("optical_zoom_medium_pos", 10)),
+            optical_zoom_closeup_pos=int(cfg.get("optical_zoom_closeup_pos", 14)),
+        )
+        self.shot_director = ShotDirector(config=shot_cfg, canvas_width=src_w)
+        self.slew_concealer = OpticalSlewConcealer()
+        self.integrity_monitor = SignalIntegrityMonitor(
+            policy=self.audio_mixer.audio_policy,
+            integrity_log_path=self.clip_base / "integrity.jsonl",
+        )
+        self._active_optical_zoom_pos = shot_cfg.optical_zoom_wide_pos
+        self._last_utterance_seen = 0
+        self._last_visual_report = None
+        self._last_visual_eval_mono = 0.0
+        self._last_integrity_eval_mono = 0.0
+        self._last_rendered_stage_frame = None
+
+        default_br = "6000k" if self.out_w >= 1920 else "2500k"
+        bitrate = cfg.get("bitrate_1080p", default_br) if self.out_w >= 1920 else cfg.get("bitrate", default_br)
+        bufsize = "12000k" if self.out_w >= 1920 else "5000k"
         if self.enable_clip_buffer:
             tee_spec = (
                 f"[f=flv:flvflags=no_duration_filesize]{target}|"
@@ -3119,7 +3358,7 @@ class DirectorStream:
              '-g', '60', '-keyint_min', '60', '-sc_threshold', '0',
              '-b:v', bitrate,
              '-maxrate', bitrate,
-             '-bufsize', '5000k',
+             '-bufsize', bufsize,
              '-pix_fmt', 'yuv420p',
              '-c:a', 'aac',
              '-b:a', '128k',
@@ -3138,7 +3377,11 @@ class DirectorStream:
         self.last_progress = time.monotonic()
         if self.ip and self.token:
             init_preset = self.privacy_preset_id if self.current_view_mode == 'privacy' else self.stage_preset_id
-            threading.Thread(target=nvr_goto_preset, args=(self.ip, self.token, init_preset), daemon=True).start()
+            def _init_cam_hw():
+                nvr_goto_preset(self.ip, self.get_token(), init_preset)
+                if self.current_view_mode == 'stage':
+                    nvr_configure_stage_optics(self.ip, self.get_token(), channel=int(self.cfg.get('nvr_channel', 0)))
+            threading.Thread(target=_init_cam_hw, daemon=True).start()
         threading.Thread(target=self.run_worker, daemon=True).start()
         threading.Thread(target=self.read_progress, daemon=True).start()
         threading.Thread(target=self.read_errors, daemon=True).start()
@@ -3214,11 +3457,16 @@ class DirectorStream:
         with self.token_lock:
             return self.token
 
-    def get_cam0_url(self):
+    def get_cam0_flv_url(self):
         token = self.get_token()
         if self.ip and token:
             return flv_url(self.ip, token, self.cfg)
         return None
+
+    def get_cam0_url(self):
+        if self._high_res_rtsp_url:
+            return self._high_res_rtsp_url
+        return self.get_cam0_flv_url()
 
     def get_cam2_url(self):
         token = self.get_token()
@@ -3333,14 +3581,15 @@ class DirectorStream:
                             self._ptz_slew_until = cur_mono + 2.8
                             self._empty_stage_gray = None
                             self._torso_hold_started_mono = None
+                            self._active_optical_zoom_pos = self.shot_director.config.optical_zoom_wide_pos
+                            self.shot_director.reset(monotonic_seconds=cur_mono)
                             self.adapter.framing.reset(monotonic_seconds=cur_mono)
                             self.adapter.tracker.enable()
                             if self.ip:
-                                threading.Thread(
-                                    target=nvr_goto_preset,
-                                    args=(self.ip, self.get_token(), self.stage_preset_id),
-                                    daemon=True,
-                                ).start()
+                                def _enter_stage_hw():
+                                    nvr_goto_preset(self.ip, self.get_token(), self.stage_preset_id)
+                                    nvr_configure_stage_optics(self.ip, self.get_token(), channel=int(self.cfg.get('nvr_channel', 0)))
+                                threading.Thread(target=_enter_stage_hw, daemon=True).start()
                         self.current_view_mode = target_view
                         self.stats['view'] = target_view
 
@@ -3376,8 +3625,17 @@ class DirectorStream:
                             sx = self.src_w / 640.0
                             sy = self.src_h / 360.0
 
+                        # Scale Haar maxSize dynamically with optical zoom so close-up faces (up to 150px) stay locked
+                        if self._active_optical_zoom_pos <= 6:
+                            max_face_640 = 62
+                        elif self._active_optical_zoom_pos <= 12:
+                            max_face_640 = 110
+                        else:
+                            max_face_640 = 158
+                        check_right_wall_exclusion = (self._active_optical_zoom_pos <= 8)
+
                         raw_faces = self.face_cascade.detectMultiScale(
-                            det_gray, scaleFactor=1.15, minNeighbors=4, minSize=(22, 22), maxSize=(58, 58)
+                            det_gray, scaleFactor=1.15, minNeighbors=4, minSize=(22, 22), maxSize=(max_face_640, max_face_640)
                         )
 
                         for (fx, fy, fw, fh) in raw_faces:
@@ -3389,7 +3647,7 @@ class DirectorStream:
                             )
                             if (
                                 bbox.center_y <= self.floor_cutoff_y
-                                and not self.adapter.tracker._is_excluded(bbox)
+                                and (not check_right_wall_exclusion or not self.adapter.tracker._is_excluded(bbox))
                                 and self.stage_polygon.contains_box(bbox)
                             ):
                                 candidate_boxes.append(bbox)
@@ -3403,17 +3661,17 @@ class DirectorStream:
                         # 1) Local ROI profile-face check (~3ms) when frontal cascade misses an active performer
                         if not candidate_boxes and is_locked_state and anchor is not None and self.profile_cascade is not None:
                             ax, ay = int(anchor.center_x / sx), int(anchor.center_y / sy)
-                            rx1, ry1 = max(0, ax - 85), max(0, ay - 75)
-                            rx2, ry2 = min(640, ax + 85), min(360, ay + 75)
+                            rx1, ry1 = max(0, ax - 95), max(0, ay - 85)
+                            rx2, ry2 = min(640, ax + 95), min(360, ay + 85)
                             roi_g = det_gray[ry1:ry2, rx1:rx2]
                             if roi_g.shape[0] >= 36 and roi_g.shape[1] >= 36:
                                 p_faces = self.profile_cascade.detectMultiScale(
-                                    roi_g, scaleFactor=1.15, minNeighbors=4, minSize=(22, 22), maxSize=(58, 58)
+                                    roi_g, scaleFactor=1.15, minNeighbors=4, minSize=(22, 22), maxSize=(max_face_640, max_face_640)
                                 )
                                 if len(p_faces) == 0:
                                     roi_flip = cv2.flip(roi_g, 1)
                                     p_flip = self.profile_cascade.detectMultiScale(
-                                        roi_flip, scaleFactor=1.15, minNeighbors=4, minSize=(22, 22), maxSize=(58, 58)
+                                        roi_flip, scaleFactor=1.15, minNeighbors=4, minSize=(22, 22), maxSize=(max_face_640, max_face_640)
                                     )
                                     if len(p_flip) > 0:
                                         fx_f, fy_f, fw_f, fh_f = p_flip[0]
@@ -3427,7 +3685,7 @@ class DirectorStream:
                                     )
                                     if (
                                         pbbox.center_y <= self.floor_cutoff_y
-                                        and not self.adapter.tracker._is_excluded(pbbox)
+                                        and (not check_right_wall_exclusion or not self.adapter.tracker._is_excluded(pbbox))
                                         and self.stage_polygon.contains_box(pbbox)
                                     ):
                                         candidate_boxes.append(pbbox)
@@ -3470,6 +3728,53 @@ class DirectorStream:
 
                         proposal = self.adapter.process_frame(candidate_boxes, cur_utc, cur_mono)
 
+                        # #I Visual Quality + P2 Autonomous Shot Direction
+                        active_face = self.adapter.tracker.active_subject or self.adapter.tracker._held_subject
+                        if self.slew_concealer.is_active or (cur_mono - self._last_visual_eval_mono >= 0.5):
+                            self._last_visual_eval_mono = cur_mono
+                            face_640 = (
+                                BoundingBox(active_face.x / sx, active_face.y / sy, active_face.width / sx, active_face.height / sy)
+                                if active_face is not None
+                                else None
+                            )
+                            self._last_visual_report = measure_visual_quality(det_gray, face_box=face_640)
+
+                        cap_snap = self.caption_engine.get_snapshot()
+                        utt_committed = bool(cap_snap.is_final and cap_snap.utterance_id > 0 and cap_snap.utterance_id != self._last_utterance_seen)
+                        if utt_committed:
+                            self._last_utterance_seen = cap_snap.utterance_id
+                        speech_age = (cur_mono - cap_snap.last_speech_mono) if cap_snap.last_speech_mono > 0.0 else 99.0
+
+                        directive = self.shot_director.step(
+                            monotonic_seconds=cur_mono,
+                            tracking_state=proposal.tracking_state,
+                            face_box=active_face,
+                            is_speaking=bool(self.audio_mixer.stats.get("voice_ducking", False)),
+                            recent_speech_age_s=speech_age,
+                            utterance_just_committed=utt_committed,
+                        )
+                        self.adapter.framing.set_shot_framing(
+                            target_face_fraction=directive.target_face_fraction,
+                            headroom_fraction=directive.target_headroom_fraction,
+                        )
+                        if directive.request_optical_move and self.ip:
+                            self._active_optical_zoom_pos = directive.desired_optical_zoom_pos
+                            # Reset empty-stage background when optical zoom changes field of view
+                            self._empty_stage_gray = None
+                            self.slew_concealer.notify_optical_move_started(self._last_rendered_stage_frame, cur_mono)
+                            log(
+                                f"Stage Director P2 shot: {directive.shot.value} ({directive.reason}) "
+                                f"-> optical zoom.pos={directive.desired_optical_zoom_pos} (#C conceal active)"
+                            )
+                            threading.Thread(
+                                target=nvr_set_zoom_pos,
+                                args=(self.ip, self.get_token(), directive.desired_optical_zoom_pos, int(self.cfg.get('nvr_channel', 0))),
+                                daemon=True,
+                            ).start()
+                        self.stats['shot'] = directive.shot.value
+                        self.stats['shot_reason'] = directive.reason
+                        self.stats['optical_zoom_pos'] = self._active_optical_zoom_pos
+
                         current_state = (proposal.tracking_state, proposal.camera_action)
                         if current_state != self._last_logged_state:
                             log(f"Stage Director state: {proposal.tracking_state}, action: {proposal.camera_action}, candidates: {onstage_count}")
@@ -3492,10 +3797,19 @@ class DirectorStream:
                     else:
                         rendered = cv2.resize(frame, (self.out_w, self.out_h), interpolation=cv2.INTER_AREA)
 
+                    # #C Conceal optical zoom & autofocus hunting until Laplacian sharpness settles
+                    cur_sharp = self._last_visual_report.focus_sharpness if self._last_visual_report else 40.0
+                    if self.slew_concealer.is_active:
+                        rendered = self.slew_concealer.blend_if_concealing(rendered, cur_sharp, cur_mono)
+                    else:
+                        self._last_rendered_stage_frame = rendered.copy()
+                    self.stats['slew_concealing'] = self.slew_concealer.is_active
+
                     zoom_factor = (proposal.framing or {}).get("zoom_factor", 1.0)
                     is_performer_framed = (
                         proposal.tracking_state in ("tracking", "holding")
                         or zoom_factor > 1.15
+                        or self._active_optical_zoom_pos > self.shot_director.config.optical_zoom_wide_pos
                     )
                     self._is_performer_framed = is_performer_framed
                     self._update_set_tracker(is_performer_framed)
@@ -3522,6 +3836,43 @@ class DirectorStream:
 
                 self.stats.update(self.audio_mixer.stats)
                 self.stats.update(self.caption_engine.stats)
+
+                # #I Continuous Signal Integrity evaluation (1 Hz)
+                if cur_mono - self._last_integrity_eval_mono >= 1.0:
+                    self._last_integrity_eval_mono = cur_mono
+                    self.integrity_monitor.update_speech_rms(
+                        self.audio_mixer._raw_pre_mix_dbfs,
+                        is_onstage=self._is_performer_framed,
+                    )
+                    with self.audio_mixer._mic_lock:
+                        mic_q_ms = len(self.audio_mixer._mic_queue) * 50.0
+                    cap_snap_i = self.caption_engine.get_snapshot()
+                    asr_lag = max(0.0, (cur_mono - cap_snap_i.updated_mono) * 1000.0) if (self._is_performer_framed and cap_snap_i.updated_mono > 0) else 0.0
+                    sig_snap = self.integrity_monitor.evaluate(
+                        now_epoch=time.time(),
+                        now_mono=cur_mono,
+                        camera_verified=bool(is_fresh),
+                        camera_source_id=f"nvr://{self.ip or 'local'}/ch{int(self.cfg.get('nvr_channel', 0))} ({self.src_w}x{self.src_h})",
+                        video_fresh=bool(is_fresh),
+                        audio_verdict=self.audio_mixer.mic_verdict,
+                        visual_report=self._last_visual_report,
+                        av_drift_ms=mic_q_ms,
+                        asr_lag_ms=min(2500.0, asr_lag),
+                        pre_mix_speech_isolated=True,
+                    )
+                    self.stats['signal_integrity'] = {
+                        'status': sig_snap.status_code,
+                        'camera_source': sig_snap.camera_source_id,
+                        'mic_source': sig_snap.mic_source_id,
+                        'mic_verified': sig_snap.mic_verified,
+                        'pre_mix_isolated': sig_snap.pre_mix_speech_isolated,
+                        'focus_sharpness': sig_snap.focus_sharpness,
+                        'face_luma': sig_snap.face_luma,
+                        'jukebox_luma': sig_snap.jukebox_luma,
+                        'speech_snr_db': sig_snap.speech_snr_db,
+                        'av_drift_ms': sig_snap.av_drift_ms,
+                        'mic_interruptions': sig_snap.mic_interruption_count,
+                    }
 
                 try:
                     self.proc.stdin.write(rendered.tobytes())
@@ -3976,6 +4327,17 @@ def main():
         _handle_theme_cli(sys.argv[2:])
     elif command in ('captions', 'caption', 'subtitles'):
         _handle_captions_cli(sys.argv[2:])
+    elif command in ('integrity', 'signal', 'cinematography'):
+        live_st = json.loads(STATUS.read_text()) if STATUS.exists() else {}
+        print(json.dumps({
+            "state": live_st.get("state"),
+            "view": live_st.get("view"),
+            "shot": live_st.get("shot", "wide"),
+            "shot_reason": live_st.get("shot_reason", ""),
+            "optical_zoom_pos": live_st.get("optical_zoom_pos", 5),
+            "slew_concealing": live_st.get("slew_concealing", False),
+            "signal_integrity": live_st.get("signal_integrity", {}),
+        }, indent=2))
     elif command == 'mark-set':
         update_state(manual_set_start_epoch=time.time())
         print(f'Set start marker recorded at {now()}. Run "box2-stream clip [label]" right after your set!')
