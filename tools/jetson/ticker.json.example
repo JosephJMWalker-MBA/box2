@@ -1,0 +1,75 @@
+{
+  "title": "BOX 2  |  CANTON REFINERY",
+  "seasonal_theme": "black_friday",
+  "messages": [
+    "NOW ON STAGE: Open Mic Comedy Session @ 9PM EST",
+    "BOOK STAGE TIME: https://box2.yurrmom.com",
+    "SPONSOR: YURRMOM.COM",
+    "UP NEXT: Comedians In The Box"
+  ],
+  "scroll_speed": 4,
+  "showtime_countdown": {
+    "enabled": true,
+    "joke_interval_s": 14.0,
+    "falling_leaves": false
+  },
+  "live_captions": {
+    "enabled": true,
+    "font_size": 38,
+    "fade_after_silence_s": 2.5,
+    "bottom_margin": 28
+  },
+  "audio_mixer": {
+    "idle_volume": 0.34,
+    "ducked_volume": 0.08,
+    "onstage_volume": 0.18,
+    "onstage_speech_volume": 0.11,
+    "onstage_mode": "bed",
+    "stage_dj_mode": "beds",
+    "mic_gain": 1.85,
+    "voice_threshold_dbfs": -35.0,
+    "mute_mic_in_privacy": true,
+    "gate_mic_offstage": true,
+    "offstage_mic_scale": 0.0
+  },
+  "parking_lot_camera": {
+    "enabled": true,
+    "channel": 1,
+    "x": 120,
+    "y": 135,
+    "width": 340,
+    "height": 191,
+    "max_opacity": 0.65,
+    "fade_speed": 0.04,
+    "style": "feathered",
+    "show_label": true,
+    "label": "PARKING LOT CENTER",
+    "crop_osd": true,
+    "temporal_smooth": true
+  },
+  "privacy_placeholder": {
+    "enabled": false,
+    "style": "fullbleed",
+    "show_standby_badge": true,
+    "badge_label": "STAGE STANDBY",
+    "show_cam2_in_privacy": true,
+    "cam2_x": 26,
+    "cam2_y": 495,
+    "cam2_opacity": 0.78
+  },
+  "wall_overlay": {
+    "enabled": false,
+    "lines": [
+      "PARKING LOT",
+      "CENTER"
+    ],
+    "style": "stacked",
+    "x": 210,
+    "y": 170,
+    "font_size": 32,
+    "letter_spacing": 6,
+    "max_opacity": 0.55,
+    "fade_speed": 0.04,
+    "color": [220, 222, 225]
+  }
+}

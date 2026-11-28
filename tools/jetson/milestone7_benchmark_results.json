@@ -1,0 +1,435 @@
+{
+  "benchmark_metadata": {
+    "title": "Box2 Stage Director Milestone 7 Jetson Validation",
+    "device": "NVIDIA Jetson Orin Nano 8GB",
+    "jetpack_version": "JetPack 7.2.1 (L4T R39.2.1)",
+    "start_time_utc": "2026-11-15T01:47:09.497461+00:00",
+    "duration_requested_s": 75.0,
+    "target_resolution": "1920x1080",
+    "target_fps": 30.0,
+    "codec_video": "h264 (libx264, preset=veryfast, zerolatency)",
+    "codec_audio": "aac (48kHz stereo, 128 kbps)",
+    "network_egress": "NONE (sandboxed local file)",
+    "framing_control_source": "scripted_ground_truth_bounding_boxes",
+    "face_detector_status": "decoupled_benchmark_only (not in live framing loop)",
+    "external_gate_disclaimer": "Physical NVR, camera SD card, and cloud recording paths remain an unverified external gate outside Python process scope."
+  },
+  "live_service_baseline_audit": {
+    "pre_run": {
+      "service_detected": true,
+      "pid": 266619,
+      "uptime": "24-23:23:36",
+      "restarts": 91,
+      "stream_fps": 10.41,
+      "cpu_percent": 6.4,
+      "rss_mb": 84.1,
+      "video_architecture": "passthrough_remux (-c:v copy)",
+      "service_state": "live"
+    },
+    "post_run": {
+      "service_detected": true,
+      "pid": 266619,
+      "uptime": "24-23:25:12",
+      "restarts": 91,
+      "stream_fps": 10.41,
+      "cpu_percent": 6.4,
+      "rss_mb": 83.4,
+      "video_architecture": "passthrough_remux (-c:v copy)",
+      "service_state": "live"
+    },
+    "uninterrupted_continuity_verified": true
+  },
+  "face_detection_decoupled_benchmark": {
+    "Native 4K": {
+      "resolution": "3840x2160",
+      "avg_latency_ms": 584.0,
+      "max_fps": 1.7,
+      "true_positives": 1,
+      "false_positives": 0,
+      "misses": 0,
+      "realtime_viable_at_30fps": false
+    },
+    "1080p": {
+      "resolution": "1920x1080",
+      "avg_latency_ms": 179.78,
+      "max_fps": 5.6,
+      "true_positives": 1,
+      "false_positives": 0,
+      "misses": 0,
+      "realtime_viable_at_30fps": false
+    },
+    "qHD 540p": {
+      "resolution": "960x540",
+      "avg_latency_ms": 67.4,
+      "max_fps": 14.8,
+      "true_positives": 1,
+      "false_positives": 0,
+      "misses": 0,
+      "realtime_viable_at_30fps": false
+    },
+    "Sub-stream 360p": {
+      "resolution": "640x360",
+      "avg_latency_ms": 35.81,
+      "max_fps": 27.9,
+      "true_positives": 1,
+      "false_positives": 0,
+      "misses": 0,
+      "realtime_viable_at_30fps": false
+    }
+  },
+  "scenario_metadata": {
+    "duration_seconds": 75.0,
+    "fps": 30,
+    "total_frames": 2250,
+    "booking_stage_seconds": 50,
+    "phases": [
+      {
+        "name": "Phase 1: Arm & Safe-Wide (Pre-Start)",
+        "time_range": "0.0s - 3.0s",
+        "expected_action": "stage_wide (no live tracking before host start)"
+      },
+      {
+        "name": "Phase 2: Genuine Host Start Action",
+        "time_range": "3.0s",
+        "expected_action": "start_set executed, lifecycle transitions to LIVE_PUBLIC"
+      },
+      {
+        "name": "Phase 3: Smooth Tracking",
+        "time_range": "3.0s - 20.0s",
+        "expected_action": "dynamic 16:9 crop follows performer"
+      },
+      {
+        "name": "Phase 4: Offstage Bystander Filter",
+        "time_range": "20.0s - 30.0s",
+        "expected_action": "offstage face rejected by stage polygon"
+      },
+      {
+        "name": "Phase 5: Secondary & Operator Switch",
+        "time_range": "30.0s - 38.0s",
+        "expected_action": "switch_second transfers tracking cleanly"
+      },
+      {
+        "name": "Phase 6: Natural warn_15 Cue",
+        "time_range": "38.0s (15s remaining)",
+        "expected_action": "warn_15 cue emitted exactly once"
+      },
+      {
+        "name": "Phase 7: Performer Loss (Hold -> Wide)",
+        "time_range": "38.0s - 46.0s",
+        "expected_action": "2.0s hold, then fallback to safe-wide"
+      },
+      {
+        "name": "Phase 8: Reacquisition",
+        "time_range": "46.0s - 53.0s",
+        "expected_action": "safe reacquisition without jumps"
+      },
+      {
+        "name": "Phase 9: Natural time_up Cue",
+        "time_range": "53.0s (0s remaining)",
+        "expected_action": "time_up cue emitted, mode FINISHED, safe-wide"
+      },
+      {
+        "name": "Phase 10: Post-Set Holding Wide",
+        "time_range": "53.0s - 65.0s",
+        "expected_action": "safe-wide hold"
+      },
+      {
+        "name": "Phase 11: Consent Revoked / Media Shutdown",
+        "time_range": "65.0s - 75.0s",
+        "expected_action": "STOPPED: 0 reads, 0 writes for 10.0s"
+      }
+    ]
+  },
+  "pipeline_execution_summary": {
+    "total_frames_processed": 2250,
+    "duration_seconds": 75.0,
+    "effective_fps": 30.0,
+    "output_resolution": [
+      1920,
+      1080
+    ],
+    "output_size_bytes": 16601711,
+    "sha256_hash": "7fdc8be361f6960492a6a9ba9e19ba0f9aee63ac85e515d3528b78482d433b79",
+    "capture_lifecycle": "stopped",
+    "source_reads_count": 1950,
+    "sink_writes_count": 1950,
+    "dropped_unauthorized_reads": 300,
+    "dropped_unauthorized_writes": 300,
+    "pts_monotonic": true
+  },
+  "ffprobe_dual_stream_verification": {
+    "valid": true,
+    "format": {
+      "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+      "duration": 65.002,
+      "size_bytes": 16601711,
+      "bit_rate": 2043224
+    },
+    "video": {
+      "codec_name": "h264",
+      "profile": "High",
+      "width": 1920,
+      "height": 1080,
+      "r_frame_rate": "30/1",
+      "pix_fmt": "yuv420p",
+      "nb_frames": 1950,
+      "duration": 65.0,
+      "total_packets": 1950,
+      "first_pts": 0.0,
+      "last_pts": 64.966667,
+      "pts_monotonic": true,
+      "packet_jitter_ms": 0.001
+    },
+    "audio": {
+      "codec_name": "aac",
+      "sample_rate": 48000,
+      "channels": 2,
+      "bit_rate": 127988,
+      "duration": 65.002,
+      "total_packets": 3048,
+      "first_pts": -0.021333,
+      "last_pts": 64.981333,
+      "pts_monotonic": true,
+      "packet_jitter_ms": 0.001
+    },
+    "av_sync": {
+      "start_drift_ms": 21.33,
+      "end_drift_ms": 14.67,
+      "duration_drift_ms": 2.0,
+      "av_synchronized": true
+    },
+    "decode_integrity_verified": true
+  },
+  "telemetry_tegrastats": {
+    "samples_count": 76,
+    "ram_used_mb": {
+      "min": 2391,
+      "max": 2756,
+      "mean": 2648.8
+    },
+    "swap_used_mb": {
+      "min": 1160,
+      "max": 1160,
+      "mean": 1160.0
+    },
+    "cpu_avg_percent": {
+      "min": 1.0,
+      "max": 66.8,
+      "mean": 44.1
+    },
+    "gpu_percent": {
+      "min": 0,
+      "max": 0,
+      "mean": 0.0
+    },
+    "temp_cpu_c": {
+      "min": 45.8,
+      "max": 47.6,
+      "mean": 46.9
+    },
+    "temp_gpu_c": {
+      "min": 45.8,
+      "max": 47.4,
+      "mean": 46.8
+    },
+    "temp_soc_c": {
+      "min": 44.1,
+      "max": 45.4,
+      "mean": 45.0
+    },
+    "power_vdd_in_mw": {
+      "min": 4848,
+      "max": 7728,
+      "mean": 6483.3
+    },
+    "power_vdd_cpu_gpu_cv_mw": {
+      "min": 476,
+      "max": 2115,
+      "mean": 1363.9
+    },
+    "power_vdd_soc_mw": {
+      "min": 1502,
+      "max": 1843,
+      "mean": 1675.3
+    }
+  },
+  "audit_event_log": [
+    {
+      "event_index": 0,
+      "timestamp_utc": "2026-11-10T00:00:03Z",
+      "monotonic_seconds": 1003.0,
+      "event_type": "host_confirmed_start",
+      "capture_lifecycle": "live_public",
+      "camera_action": "live",
+      "remaining_seconds": 50,
+      "cue": null,
+      "source_reads_count": 90,
+      "sink_writes_count": 90,
+      "broadcast_audio_silent": true,
+      "details": "Host explicitly confirmed set start."
+    },
+    {
+      "event_index": 1,
+      "timestamp_utc": "2026-11-10T00:00:03Z",
+      "monotonic_seconds": 1003.0,
+      "event_type": "lifecycle_transition_to_live_public",
+      "capture_lifecycle": "live_public",
+      "camera_action": "track_face",
+      "remaining_seconds": 50,
+      "cue": null,
+      "source_reads_count": 90,
+      "sink_writes_count": 90,
+      "broadcast_audio_silent": true,
+      "details": "Capture lifecycle changed from armed_public to live_public."
+    },
+    {
+      "event_index": 2,
+      "timestamp_utc": "2026-11-10T00:00:38Z",
+      "monotonic_seconds": 1038.0,
+      "event_type": "cue_warn_15",
+      "capture_lifecycle": "live_public",
+      "camera_action": "track_face",
+      "remaining_seconds": 15,
+      "cue": "warn_15",
+      "source_reads_count": 1140,
+      "sink_writes_count": 1140,
+      "broadcast_audio_silent": true,
+      "details": "Performance countdown cue warn_15 fired naturally."
+    },
+    {
+      "event_index": 3,
+      "timestamp_utc": "2026-11-10T00:00:53Z",
+      "monotonic_seconds": 1053.0,
+      "event_type": "cue_time_up",
+      "capture_lifecycle": "armed_public",
+      "camera_action": "stage_wide",
+      "remaining_seconds": 0,
+      "cue": "time_up",
+      "source_reads_count": 1590,
+      "sink_writes_count": 1590,
+      "broadcast_audio_silent": true,
+      "details": "Performance countdown cue time_up fired naturally."
+    },
+    {
+      "event_index": 4,
+      "timestamp_utc": "2026-11-10T00:00:53Z",
+      "monotonic_seconds": 1053.0,
+      "event_type": "lifecycle_transition_to_armed_public",
+      "capture_lifecycle": "armed_public",
+      "camera_action": "stage_wide",
+      "remaining_seconds": 0,
+      "cue": "time_up",
+      "source_reads_count": 1590,
+      "sink_writes_count": 1590,
+      "broadcast_audio_silent": true,
+      "details": "Capture lifecycle changed from live_public to armed_public."
+    },
+    {
+      "event_index": 5,
+      "timestamp_utc": "2026-11-10T00:01:05Z",
+      "monotonic_seconds": 1065.0,
+      "event_type": "media_shutdown",
+      "capture_lifecycle": "stopped",
+      "camera_action": "capture_off",
+      "remaining_seconds": null,
+      "cue": null,
+      "source_reads_count": 1950,
+      "sink_writes_count": 1950,
+      "broadcast_audio_silent": true,
+      "details": "Media input/output stopped due to revoke_consent."
+    },
+    {
+      "event_index": 6,
+      "timestamp_utc": "2026-11-10T00:01:05Z",
+      "monotonic_seconds": 1065.0,
+      "event_type": "lifecycle_transition_to_stopped",
+      "capture_lifecycle": "stopped",
+      "camera_action": "capture_off",
+      "remaining_seconds": null,
+      "cue": null,
+      "source_reads_count": 1950,
+      "sink_writes_count": 1950,
+      "broadcast_audio_silent": true,
+      "details": "Capture lifecycle changed from armed_public to stopped."
+    }
+  ],
+  "transition_stills_verification": {
+    "01_arm_safe_wide_pre_start": {
+      "frame_index": 15,
+      "filename": "m7_still_01_arm_safe_wide_pre_start_f0015.png",
+      "filepath": "tools/jetson/stills/m7_still_01_arm_safe_wide_pre_start_f0015.png",
+      "mean_luminance": 32.6,
+      "non_zero_pixels": 6216010
+    },
+    "02_host_confirmed_medium_shot": {
+      "frame_index": 120,
+      "filename": "m7_still_02_host_confirmed_medium_shot_f0120.png",
+      "filepath": "tools/jetson/stills/m7_still_02_host_confirmed_medium_shot_f0120.png",
+      "mean_luminance": 32.84,
+      "non_zero_pixels": 6213419
+    },
+    "03_smooth_pacing_tracking": {
+      "frame_index": 300,
+      "filename": "m7_still_03_smooth_pacing_tracking_f0300.png",
+      "filepath": "tools/jetson/stills/m7_still_03_smooth_pacing_tracking_f0300.png",
+      "mean_luminance": 34.12,
+      "non_zero_pixels": 6211476
+    },
+    "04_offstage_bystander_rejected": {
+      "frame_index": 700,
+      "filename": "m7_still_04_offstage_bystander_rejected_f0700.png",
+      "filepath": "tools/jetson/stills/m7_still_04_offstage_bystander_rejected_f0700.png",
+      "mean_luminance": 34.01,
+      "non_zero_pixels": 6211590
+    },
+    "05_operator_switched_guest": {
+      "frame_index": 1050,
+      "filename": "m7_still_05_operator_switched_guest_f1050.png",
+      "filepath": "tools/jetson/stills/m7_still_05_operator_switched_guest_f1050.png",
+      "mean_luminance": 38.12,
+      "non_zero_pixels": 6203547
+    },
+    "06_natural_warn_15_cue": {
+      "frame_index": 1140,
+      "filename": "m7_still_06_natural_warn_15_cue_f1140.png",
+      "filepath": "tools/jetson/stills/m7_still_06_natural_warn_15_cue_f1140.png",
+      "mean_luminance": 30.05,
+      "non_zero_pixels": 6219947
+    },
+    "07_subject_loss_hold_position": {
+      "frame_index": 1180,
+      "filename": "m7_still_07_subject_loss_hold_position_f1180.png",
+      "filepath": "tools/jetson/stills/m7_still_07_subject_loss_hold_position_f1180.png",
+      "mean_luminance": 30.05,
+      "non_zero_pixels": 6219947
+    },
+    "08_subject_loss_fallback_wide": {
+      "frame_index": 1300,
+      "filename": "m7_still_08_subject_loss_fallback_wide_f1300.png",
+      "filepath": "tools/jetson/stills/m7_still_08_subject_loss_fallback_wide_f1300.png",
+      "mean_luminance": 30.55,
+      "non_zero_pixels": 6215917
+    },
+    "09_seamless_reacquisition": {
+      "frame_index": 1440,
+      "filename": "m7_still_09_seamless_reacquisition_f1440.png",
+      "filepath": "tools/jetson/stills/m7_still_09_seamless_reacquisition_f1440.png",
+      "mean_luminance": 34.0,
+      "non_zero_pixels": 6207769
+    },
+    "10_natural_time_up_cue_wide": {
+      "frame_index": 1600,
+      "filename": "m7_still_10_natural_time_up_cue_wide_f1600.png",
+      "filepath": "tools/jetson/stills/m7_still_10_natural_time_up_cue_wide_f1600.png",
+      "mean_luminance": 32.6,
+      "non_zero_pixels": 6215586
+    },
+    "11_post_set_safe_wide": {
+      "frame_index": 1900,
+      "filename": "m7_still_11_post_set_safe_wide_f1900.png",
+      "filepath": "tools/jetson/stills/m7_still_11_post_set_safe_wide_f1900.png",
+      "mean_luminance": 32.6,
+      "non_zero_pixels": 6215586
+    }
+  }
+}

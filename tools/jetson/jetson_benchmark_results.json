@@ -1,0 +1,91 @@
+{
+  "timestamp_utc": "2026-11-09T23:26:36Z",
+  "system_info": {
+    "model": "NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super\u0000",
+    "tegra_release": "# R39 (release), REVISION: 2.1, GCID: 46758480, BOARD: generic, EABI: aarch64, DATE: Fri Aug  7 05:54:22 AM UTC 2026\n# KERNEL_VARIANT: oot\nTARGET_USERSPACE_LIB_DIR=nvidia\nTARGET_USERSPACE_LIB_DIR_PATH=usr/lib/aarch64-linux-gnu/nvidia",
+    "total_memory_mb": 7485.6,
+    "available_memory_mb": 4656.4,
+    "cpu_cores": 6,
+    "initial_temp_c": 46.5
+  },
+  "math_benchmark": {
+    "iterations": 1800,
+    "total_elapsed_s": 0.0021,
+    "avg_frame_latency_us": 1.18,
+    "throughput_fps": 845577.4
+  },
+  "encoding_benchmarks": [
+    {
+      "preset": "ultrafast",
+      "target_resolution": "1920x1080",
+      "target_fps": 30,
+      "target_bitrate_kbps": 4500,
+      "test_duration_s": 20,
+      "realtime_paced": true,
+      "actual_elapsed_s": 20.13,
+      "frames_encoded": 600,
+      "expected_frames": 600,
+      "dropped_frames": 0,
+      "sustained_fps": 31.0,
+      "speed_ratio": 1.02,
+      "realtime_sustained": true,
+      "thermal_start_c": 46.5,
+      "thermal_peak_c": 47.1,
+      "thermal_rise_c": 0.6,
+      "cpu_freq_range_mhz": [
+        729,
+        1344
+      ],
+      "throttled": false,
+      "samples_count": 20
+    },
+    {
+      "preset": "veryfast",
+      "target_resolution": "1920x1080",
+      "target_fps": 30,
+      "target_bitrate_kbps": 4500,
+      "test_duration_s": 20,
+      "realtime_paced": true,
+      "actual_elapsed_s": 20.15,
+      "frames_encoded": 600,
+      "expected_frames": 600,
+      "dropped_frames": 0,
+      "sustained_fps": 31.0,
+      "speed_ratio": 1.02,
+      "realtime_sustained": true,
+      "thermal_start_c": 46.6,
+      "thermal_peak_c": 47.5,
+      "thermal_rise_c": 0.9,
+      "cpu_freq_range_mhz": [
+        729,
+        1344
+      ],
+      "throttled": false,
+      "samples_count": 20
+    },
+    {
+      "preset": "faster",
+      "target_resolution": "1920x1080",
+      "target_fps": 30,
+      "target_bitrate_kbps": 4500,
+      "test_duration_s": 20,
+      "realtime_paced": true,
+      "actual_elapsed_s": 20.15,
+      "frames_encoded": 600,
+      "expected_frames": 600,
+      "dropped_frames": 0,
+      "sustained_fps": 31.0,
+      "speed_ratio": 1.02,
+      "realtime_sustained": true,
+      "thermal_start_c": 46.9,
+      "thermal_peak_c": 48.0,
+      "thermal_rise_c": 1.1,
+      "cpu_freq_range_mhz": [
+        729,
+        1344
+      ],
+      "throttled": false,
+      "samples_count": 20
+    }
+  ]
+}
