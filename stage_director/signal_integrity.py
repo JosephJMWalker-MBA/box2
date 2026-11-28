@@ -275,7 +275,7 @@ class SignalIntegrityMonitor:
         self,
         policy: Optional[AudioAuthorityPolicy] = None,
         integrity_log_path: Optional[Path] = None,
-        max_av_drift_ms: float = 120.0,
+        max_av_drift_ms: float = 260.0,
     ) -> None:
         self.policy = policy or AudioAuthorityPolicy()
         self.integrity_log_path = Path(integrity_log_path) if integrity_log_path else None

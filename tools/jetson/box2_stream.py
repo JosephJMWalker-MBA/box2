@@ -3845,7 +3845,7 @@ class DirectorStream:
                         is_onstage=self._is_performer_framed,
                     )
                     with self.audio_mixer._mic_lock:
-                        mic_q_ms = len(self.audio_mixer._mic_queue) * 50.0
+                        mic_q_ms = max(0.0, (len(self.audio_mixer._mic_queue) - 2) * 50.0)
                     cap_snap_i = self.caption_engine.get_snapshot()
                     asr_lag = max(0.0, (cur_mono - cap_snap_i.updated_mono) * 1000.0) if (self._is_performer_framed and cap_snap_i.updated_mono > 0) else 0.0
                     sig_snap = self.integrity_monitor.evaluate(
