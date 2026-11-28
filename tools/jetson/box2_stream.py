@@ -558,6 +558,21 @@ class AutoDuckEnvelope:
         return np.clip(mixed * 32767.0, -32767.0, 32767.0).astype(np.int16)
 
 
+def resolve_effective_dj_mode(cur_view: str, dj_mode: str, stage_dj_mode: str = "beds") -> str:
+    """Resolve active DJ source by view window.
+
+    - Off-hours (`privacy`, 2 AM - 9 PM): runs `dj_mode` (`spotify` / `rotate` / `house`) so Spotify & YurrMom.Com tracks play.
+    - Showtime (`stage`, 9 PM - 2 AM): defaults to `stage_dj_mode` (`beds`), pausing Spotify & vocal songs and airing the vocal-carved Stage Groove bed.
+    """
+    djm = str(dj_mode or "spotify").lower()
+    st_djm = str(stage_dj_mode or "beds").lower()
+    if cur_view == "stage":
+        return st_djm if st_djm in ("beds", "rotate", "suno", "spotify", "house") else "beds"
+    if cur_view == "privacy" and djm == "rotate":
+        return "spotify"
+    return djm
+
+
 class BroadcastAudioMixer:
     """Real-time 48kHz stereo PCM broadcast mixer feeding FFmpeg via local OS pipe.
 
@@ -630,6 +645,8 @@ class BroadcastAudioMixer:
 
         self._music_mode = "auto"  # "auto" (on during standby & showtime), "on", "off"
         self._dj_mode = str(self.cfg.get("dj_mode", "spotify"))  # "spotify", "rotate", "suno", "house", "beds"
+        self._stage_dj_mode = str(self.cfg.get("stage_dj_mode", "beds"))  # 9PM-2AM showtime default: pause Spotify & play Stage Groove bed
+        self._effective_dj_mode = resolve_effective_dj_mode(self.view_getter(), self._dj_mode, self._stage_dj_mode)
         self._suno_block_tracks = int(self.cfg.get("suno_tracks_per_block", 3))
         self._spotify_block_tracks = int(self.cfg.get("spotify_tracks_per_block", 3))
         self._test_ad_until_epoch = 0.0
@@ -641,7 +658,10 @@ class BroadcastAudioMixer:
         )
         self._scheduled_ad_active = False
         self._ad_now_seq = 0
-        self._mute_mic_in_privacy = bool(self.cfg.get("mute_mic_in_privacy", False))
+        self._mute_mic_in_privacy = bool(self.cfg.get("mute_mic_in_privacy", True))
+        self._gate_mic_offstage = bool(self.cfg.get("gate_mic_offstage", True))
+        self._offstage_mic_scale = float(self.cfg.get("offstage_mic_scale", 0.0))
+        self._mic_stage_gate = 0.0
         self._skip_seq = 0
         self._ad_skip_seq = 0
         self._last_cfg_poll = 0.0
@@ -716,6 +736,12 @@ class BroadcastAudioMixer:
                         self.envelope.voice_threshold_dbfs = float(am["voice_threshold_dbfs"])
                     if "mute_mic_in_privacy" in am:
                         self._mute_mic_in_privacy = bool(am["mute_mic_in_privacy"])
+                    if "gate_mic_offstage" in am:
+                        self._gate_mic_offstage = bool(am["gate_mic_offstage"])
+                    if "offstage_mic_scale" in am:
+                        self._offstage_mic_scale = max(0.0, min(1.0, float(am["offstage_mic_scale"])))
+                    if "stage_dj_mode" in am and str(am["stage_dj_mode"]).lower() in ("beds", "rotate", "suno", "spotify", "house"):
+                        self._stage_dj_mode = str(am["stage_dj_mode"]).lower()
             except Exception:
                 pass
 
@@ -744,6 +770,8 @@ class BroadcastAudioMixer:
             djm = str(dj_cfg.get("mode", self._dj_mode)).lower()
             if djm in ("rotate", "suno", "spotify", "house", "beds"):
                 self._dj_mode = djm
+            if "stage_mode" in dj_cfg and str(dj_cfg["stage_mode"]).lower() in ("beds", "rotate", "suno", "spotify", "house"):
+                self._stage_dj_mode = str(dj_cfg["stage_mode"]).lower()
             if "suno_tracks" in dj_cfg:
                 self._suno_block_tracks = max(1, int(dj_cfg["suno_tracks"]))
             if "spotify_tracks" in dj_cfg:
@@ -768,24 +796,21 @@ class BroadcastAudioMixer:
 
         cur_view = self.view_getter()
         cur_pol = self.policy_getter()
+        self._effective_dj_mode = resolve_effective_dj_mode(cur_view, self._dj_mode, self._stage_dj_mode)
         if self._music_mode == "on":
             self._music_desired_now = True
         elif self._music_mode == "off":
             self._music_desired_now = False
         else:
-            # "auto": play continuously in privacy standby (racks up YurrMom.Com Spotify streams & covers room dead air)
-            # and during 9PM-2AM showtime (with voice/stage auto-ducking); quiet only during active rehearsal.
+            # "auto": play Spotify/YurrMom.Com in privacy standby (2 AM - 9 PM) and Stage Groove bed during 9 PM - 2 AM showtime.
             self._music_desired_now = (cur_pol != "rehearse")
 
         if force or (now_mono - self._last_mpris_poll >= 1.0):
             self._last_mpris_poll = now_mono
-            # Prioritize Spotify (YurrMom.Com) during off-hours privacy standby for maximum stream royalties;
-            # run full Suno <-> Spotify rotation (or user's pinned mode) during active stage hours.
-            eff_dj_mode = "spotify" if (cur_view == "privacy" and self._dj_mode == "rotate") else self._dj_mode
             try:
                 dec, _ = self._radio_ctrl.poll_and_step(
                     music_desired_now=self._music_desired_now,
-                    dj_mode=eff_dj_mode,
+                    dj_mode=self._effective_dj_mode,
                     suno_tracks=self._suno_block_tracks,
                     spotify_tracks=self._spotify_block_tracks,
                 )
@@ -796,7 +821,8 @@ class BroadcastAudioMixer:
         cur_view = self.view_getter()
         is_onstage_now = bool(self.onstage_getter()) if cur_view == "stage" else False
         if (
-            self._ad_interval_minutes > 0.0
+            cur_view == "privacy"
+            and self._ad_interval_minutes > 0.0
             and self._music_desired_now
             and not self._scheduled_ad_active
             and self._next_scheduled_ad_mono > 0.0
@@ -890,7 +916,7 @@ class BroadcastAudioMixer:
     def _dj_bus_reader_worker(self):
         """Capture stereo 48kHz PCM from PipeWire virtual sink `box2_dj_bus.monitor`."""
         while not self._stop_event.is_set():
-            if not self._music_desired_now or self._dj_mode == "house":
+            if not self._music_desired_now or self._effective_dj_mode in ("house", "beds"):
                 with self._dj_bus_lock:
                     self._dj_bus_queue.clear()
                 time.sleep(0.4)
@@ -907,7 +933,7 @@ class BroadcastAudioMixer:
             try:
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
                 self._dj_bus_proc = proc
-                while not self._stop_event.is_set() and self._music_desired_now and self._dj_mode != "house":
+                while not self._stop_event.is_set() and self._music_desired_now and self._effective_dj_mode not in ("house", "beds"):
                     buf = proc.stdout.read(self.CHUNK_BYTES)
                     if not buf or len(buf) < self.CHUNK_BYTES:
                         break
@@ -1065,7 +1091,8 @@ class BroadcastAudioMixer:
         last_path = None
 
         while not self._stop_event.is_set():
-            if not self._music_desired_now and self.envelope.current_gain <= 0.001:
+            bed_only_idle = (self._effective_dj_mode == "beds" and self._bed_mix_ratio >= 0.99 and not self._ad_swap_desired_now)
+            if (not self._music_desired_now and self.envelope.current_gain <= 0.001) or bed_only_idle:
                 self._current_track = ""
                 with self._music_lock:
                     self._music_queue.clear()
@@ -1113,7 +1140,9 @@ class BroadcastAudioMixer:
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                 self._music_proc = proc
                 while not self._stop_event.is_set() and local_skip == self._skip_seq:
-                    if not self._music_desired_now and self.envelope.current_gain <= 0.001:
+                    if (not self._music_desired_now and self.envelope.current_gain <= 0.001) or (
+                        self._effective_dj_mode == "beds" and self._bed_mix_ratio >= 0.99 and not self._ad_swap_desired_now
+                    ):
                         break
                     with self._music_lock:
                         q_len = len(self._music_queue)
@@ -1154,42 +1183,58 @@ class BroadcastAudioMixer:
                     mic_raw = self._mic_queue.popleft() if self._mic_queue else None
 
                 cur_view = self.view_getter()
-                mute_mic = (cur_view == "privacy" and self._mute_mic_in_privacy)
+                is_onstage = bool(self.onstage_getter()) if cur_view == "stage" else False
 
-                if mic_raw is not None and not mute_mic and np is not None:
+                # Smooth camera-mic stage gate:
+                # - 2 AM - 9 PM (`privacy`): 100% muted when `mute_mic_in_privacy` is True (0.12x otherwise).
+                # - 9 PM - 2 AM (`stage`): gated down to `offstage_mic_scale` (default 0.0) whenever nobody is on stage
+                #   so ambient desk typing, speakers, or across-the-room voices never bleed onto Twitch; ramps smoothly
+                #   in 80 ms to 1.0 the instant a performer steps onto the stage.
+                if cur_view == "privacy":
+                    target_mic_gate = 0.0 if self._mute_mic_in_privacy else 0.12
+                elif is_onstage or not self._gate_mic_offstage:
+                    target_mic_gate = 1.0
+                else:
+                    target_mic_gate = self._offstage_mic_scale
+
+                if target_mic_gate > self._mic_stage_gate:
+                    gate_alpha = 1.0 - math.exp(-self.CHUNK_SEC / 0.08)
+                else:
+                    gate_alpha = 1.0 - math.exp(-self.CHUNK_SEC / 0.65)
+                self._mic_stage_gate += gate_alpha * (target_mic_gate - self._mic_stage_gate)
+                if self._mic_stage_gate < 0.0005 and target_mic_gate == 0.0:
+                    self._mic_stage_gate = 0.0
+
+                if mic_raw is not None and self._mic_stage_gate > 0.0005 and np is not None:
                     mic_i16 = np.frombuffer(mic_raw, dtype=np.int16).reshape(-1, 2)
                     mic_f32 = mic_i16.astype(np.float32) / 32768.0
                     mono = 0.5 * (mic_f32[:, 0] + mic_f32[:, 1])
                     mono_hp = self.envelope.highpass_rumble_cut(mono)
                     # Broadcast stereo vocal cleanup: apply rumble cut to both channels
                     rumble = (mono - mono_hp)[:, None]
-                    mic_clean = mic_f32 - rumble
-                    mic_dbfs = self.envelope.compute_rms_dbfs(mono_hp)
-                    if cur_view == "privacy":
-                        # During off-stage privacy standby, tuck ambient room mic way down so music cleanly covers dead air
-                        mic_clean = mic_clean * 0.12
+                    mic_clean = (mic_f32 - rumble) * self._mic_stage_gate
+                    mic_dbfs = self.envelope.compute_rms_dbfs(mono_hp * self._mic_stage_gate)
                 else:
                     mic_clean = zero_stereo
                     mic_dbfs = -90.0
 
-                is_onstage = bool(self.onstage_getter()) if cur_view == "stage" else False
-                duck_mic_dbfs = mic_dbfs if cur_view == "stage" else -90.0
+                duck_mic_dbfs = mic_dbfs if is_onstage else -90.0
                 dj_bus_hot = (now_mono - self._dj_bus_last_audible_mono) < 3.0
                 dec = self._radio_decision
                 ad_swap_active = self._ad_swap_desired_now
                 dj_air_active = (
                     not ad_swap_active
-                    and self._dj_mode not in ("house", "beds")
+                    and self._effective_dj_mode not in ("house", "beds")
                     and dec.action == "air_bus"
                     and dj_bus_hot
                 )
 
-                # Smoothly crossfade (~0.9s) into the vocal-carved Stage Attention Bed whenever
-                # a performer takes the stage (or if user pinned `dj beds` mode)
+                # Smoothly crossfade (~0.9s) into the vocal-carved Stage Attention Bed throughout
+                # 9 PM - 2 AM showtime (`effective_dj_mode == 'beds'`) or when pinned on stage
                 want_stage_bed = bool(
                     self._current_stage_bed
                     and not ad_swap_active
-                    and (self._dj_mode == "beds" or (is_onstage and self.envelope.onstage_mode == "bed"))
+                    and (self._effective_dj_mode == "beds" or (is_onstage and self.envelope.onstage_mode == "bed"))
                 )
                 target_bed_ratio = 1.0 if want_stage_bed else 0.0
                 bed_step = self.CHUNK_SEC / 0.90
@@ -1284,9 +1329,11 @@ class BroadcastAudioMixer:
                 )
                 self.stats.update(
                     mic_dbfs=round(mic_dbfs, 1),
+                    mic_gated=bool(self._mic_stage_gate < 0.05),
                     voice_ducking=bool(voice_active),
                     music_mode=self._music_mode,
                     dj_mode=self._dj_mode,
+                    effective_dj_mode=self._effective_dj_mode,
                     audio_source=active_source if self._music_desired_now else "off",
                     ad_shield_active=bool(ad_swap_active),
                     ad_interval_minutes=self._ad_interval_minutes,

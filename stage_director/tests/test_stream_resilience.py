@@ -601,6 +601,35 @@ class StreamResilienceTests(unittest.TestCase):
         self.assertLessEqual(max(smooth_widths) - min(smooth_widths), 1.0)
         self.assertAlmostEqual(smooth_widths[-1], settled_w, delta=1.0)
 
+    def test_showtime_pauses_spotify_and_plays_stage_beds_and_gates_offstage_mic(self):
+        """Verifies 9PM stage mode pauses Spotify/vocal shuffle for Stage Groove beds and gates off-stage room mic."""
+        b2s = _load_b2s()
+        radio = b2s.box2_radio
+
+        # 1. Off-hours (`privacy`) keeps Spotify active; 9PM showtime (`stage`) switches to `beds`
+        self.assertEqual(b2s.resolve_effective_dj_mode("privacy", "spotify", "beds"), "spotify")
+        self.assertEqual(b2s.resolve_effective_dj_mode("privacy", "rotate", "beds"), "spotify")
+        self.assertEqual(b2s.resolve_effective_dj_mode("stage", "spotify", "beds"), "beds")
+
+        # 2. `RadioRotationScheduler` in `beds` mode sends `Pause` to active Spotify Connect / browser players
+        sched = radio.RadioRotationScheduler()
+        players = {
+            "spotify": radio.PlayerSnapshot("http://127.0.0.1:3678", "spotify", "Playing", title="Track 1", artist="YurrMom.Com"),
+        }
+        decs = {"spotify": radio.classify_mpris_track("spotify", "Playing", "Track 1", "YurrMom.Com")}
+        target, cmds = sched.step("beds", players, decs, now_mono=100.0)
+        self.assertEqual(target, "beds")
+        self.assertIn(("spotify", "Pause"), cmds)
+
+        # And at 2:00 AM when returning to `spotify` mode while Spotify is Paused, it sends `Play`!
+        players_paused = {
+            "spotify": radio.PlayerSnapshot("http://127.0.0.1:3678", "spotify", "Paused", title="Track 1", artist="YurrMom.Com"),
+        }
+        decs_paused = {"spotify": radio.classify_mpris_track("spotify", "Paused", "Track 1", "YurrMom.Com")}
+        target_2am, cmds_2am = sched.step("spotify", players_paused, decs_paused, now_mono=200.0)
+        self.assertEqual(target_2am, "spotify")
+        self.assertIn(("spotify", "Play"), cmds_2am)
+
 
 if __name__ == "__main__":
     unittest.main()

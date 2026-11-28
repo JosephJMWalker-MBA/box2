@@ -18,10 +18,13 @@
     "ducked_volume": 0.08,
     "onstage_volume": 0.18,
     "onstage_speech_volume": 0.11,
-    "onstage_mode": "undertone",
+    "onstage_mode": "bed",
+    "stage_dj_mode": "beds",
     "mic_gain": 1.85,
     "voice_threshold_dbfs": -35.0,
-    "mute_mic_in_privacy": false
+    "mute_mic_in_privacy": true,
+    "gate_mic_offstage": true,
+    "offstage_mic_scale": 0.0
   },
   "parking_lot_camera": {
     "enabled": true,

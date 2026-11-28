@@ -192,12 +192,12 @@ class RadioRotationScheduler:
     def step(self, mode: str, players: dict, decisions: dict, now_mono: float):
         """Return (desired_role, commands_list) where commands_list is [(role, 'Play'|'Pause')]."""
         mode = str(mode or "rotate").lower()
-        if mode == "house":
+        if mode in ("house", "beds"):
             cmds = []
             for r, snap in players.items():
                 if snap.playback_status.lower() == "playing":
                     cmds.append((r, "Pause"))
-            return "house", cmds
+            return mode, cmds
 
         has_suno = "suno" in players
         has_spotify = "spotify" in players
