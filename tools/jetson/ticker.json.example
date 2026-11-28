@@ -13,6 +13,12 @@
     "joke_interval_s": 14.0,
     "falling_leaves": false
   },
+  "live_captions": {
+    "enabled": true,
+    "font_size": 38,
+    "fade_after_silence_s": 2.5,
+    "bottom_margin": 28
+  },
   "audio_mixer": {
     "idle_volume": 0.34,
     "ducked_volume": 0.08,

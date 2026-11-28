@@ -81,6 +81,11 @@ try:
 except ImportError:
     from tools.jetson import box2_chessheat
 
+try:
+    import box2_captions
+except ImportError:
+    from tools.jetson import box2_captions
+
 # Stage Director integration
 STAGE_DIR = Path("/home/joseph1/stage-director")
 if str(STAGE_DIR) not in sys.path:
@@ -594,6 +599,7 @@ class BroadcastAudioMixer:
         view_getter=None,
         policy_getter=None,
         onstage_getter=None,
+        caption_engine=None,
         secrets=None,
         ticker_path="/home/joseph1/box2-stream/ticker.json",
     ):
@@ -603,6 +609,7 @@ class BroadcastAudioMixer:
         self.view_getter = view_getter or (lambda: "stage")
         self.policy_getter = policy_getter or (lambda: "auto")
         self.onstage_getter = onstage_getter or (lambda: False)
+        self.caption_engine = caption_engine
         self.secrets = secrets or []
         self.ticker_path = ticker_path
 
@@ -1214,6 +1221,8 @@ class BroadcastAudioMixer:
                     rumble = (mono - mono_hp)[:, None]
                     mic_clean = (mic_f32 - rumble) * self._mic_stage_gate
                     mic_dbfs = self.envelope.compute_rms_dbfs(mono_hp * self._mic_stage_gate)
+                    if self.caption_engine is not None and is_onstage:
+                        self.caption_engine.push_mic_pcm48_mono(mono_hp * self.envelope.mic_gain, is_onstage=True)
                 else:
                     mic_clean = zero_stereo
                     mic_dbfs = -90.0
@@ -1700,8 +1709,18 @@ def extract_clip(
         except Exception:
             pass
 
+    first_seg_start = segs[0].stat().st_mtime - seg_seconds
+    clip_actual_start = first_seg_start + (trim_offset if trim_offset >= 2.0 else 0.0)
+    srt_out = box2_captions.export_srt_for_clip(
+        mp4_path=out_mp4,
+        clip_start_epoch=clip_actual_start,
+        clip_end_epoch=clip_actual_start + actual_dur,
+        captions_log=clip_base / "captions.jsonl",
+    )
+
     return {
         "path": str(out_mp4),
+        "srt_path": str(srt_out) if srt_out else None,
         "duration_s": round(actual_dur, 1),
         "size_mb": round(size_mb, 2),
         "segments_used": len(segs),
@@ -2946,6 +2965,18 @@ class DirectorStream:
             y=148,
         )
         self.wall_overlay = WallOverlay(config_path="/home/joseph1/box2-stream/ticker.json", base_w=self.out_w, base_h=self.out_h)
+        self.caption_engine = box2_captions.LiveCaptionEngine(
+            enabled=bool(cfg.get("live_captions_enabled", True)),
+            model_name=str(cfg.get("asr_model", "base.en")),
+            captions_log=self.clip_base / "captions.jsonl",
+        )
+        self.caption_overlay = box2_captions.LiveCaptionOverlay(
+            engine=self.caption_engine,
+            config_path="/home/joseph1/box2-stream/ticker.json",
+            state_path=str(STATE),
+            base_w=self.out_w,
+            base_h=self.out_h,
+        )
 
         cam2_getter = self.get_cam2_url if (self.ip and self.token) else cam2_url
         self.cam2_overlay = CameraFeedWallOverlay(cam2_getter, config_path="/home/joseph1/box2-stream/ticker.json", base_w=self.out_w, base_h=self.out_h) if (cam2_url or self.ip) else None
@@ -3051,6 +3082,7 @@ class DirectorStream:
             view_getter=(lambda: self.current_view_mode),
             policy_getter=(lambda: self._current_policy),
             onstage_getter=(lambda: self._is_performer_framed),
+            caption_engine=self.caption_engine,
             secrets=secrets,
         )
 
@@ -3473,6 +3505,9 @@ class DirectorStream:
                     else:
                         self.wall_overlay.draw(rendered, is_performer_framed=is_performer_framed)
 
+                    # Big punchy live stand-up captions at bottom-center (only when performer is onstage)
+                    self.caption_overlay.draw(rendered, is_performer_framed=is_performer_framed, now_mono=cur_mono)
+
                 if self.current_view_mode == "privacy":
                     self.countdown_overlay.draw(rendered, standby_mode=True, top_matte_h=self.top_matte_h)
                     self.chessheat_overlay.x = self.countdown_overlay.x
@@ -3486,6 +3521,7 @@ class DirectorStream:
                     self.ticker.draw_now_playing_tab(rendered, self.audio_mixer.stats)
 
                 self.stats.update(self.audio_mixer.stats)
+                self.stats.update(self.caption_engine.stats)
 
                 try:
                     self.proc.stdin.write(rendered.tobytes())
@@ -3502,6 +3538,7 @@ class DirectorStream:
             self._update_set_tracker(False, force_close=True)
             self.cam_reader.stop()
             self.audio_mixer.stop()
+            self.caption_engine.stop()
             try:
                 self.proc.stdin.close()
             except Exception:
@@ -3550,6 +3587,7 @@ class DirectorStream:
         self._stop_event.set()
         self.cam_reader.stop()
         self.audio_mixer.stop()
+        self.caption_engine.stop()
         self.chessheat_overlay.stop()
         if self.proc.poll() is None:
             os.killpg(self.proc.pid, signal.SIGTERM)
@@ -3816,6 +3854,39 @@ def _handle_joke_cli(args):
         }, indent=2))
 
 
+def _handle_captions_cli(args):
+    st = read_state()
+    cc = dict(st.get('captions', {})) if isinstance(st.get('captions'), dict) else {}
+    sub = args[0].lower() if args else 'status'
+    if sub in ('on', 'enable', 'start'):
+        cc['enabled'] = True
+        update_state(captions=cc)
+        print("Live onstage stand-up captions ON (bottom-center punchy overlay + automatic .srt export on clips).")
+    elif sub in ('off', 'disable', 'stop'):
+        cc['enabled'] = False
+        update_state(captions=cc)
+        print("Live onstage stand-up captions OFF (hot-reloaded with zero stream drop).")
+    elif sub == 'transcribe' and len(args) >= 2:
+        src_mp4 = Path(args[1]).expanduser()
+        srt_p = box2_captions.transcribe_media_to_srt(src_mp4, ffmpeg_bin=FFMPEG)
+        if srt_p is None:
+            raise SystemExit(f"Could not transcribe {src_mp4} (check file path and faster-whisper installation).")
+        print(json.dumps({"mp4": str(src_mp4), "srt": str(srt_p), "bytes": srt_p.stat().st_size}, indent=2))
+    else:
+        live_st = {}
+        if STATUS.exists():
+            try:
+                live_st = json.loads(STATUS.read_text())
+            except Exception:
+                pass
+        print(json.dumps({
+            "captions_enabled": cc.get("enabled", True),
+            "captions_engine": live_st.get("captions_engine", "ready"),
+            "last_caption": live_st.get("last_caption", ""),
+            "captions_log": str(DEFAULT_CLIP_BASE / "captions.jsonl"),
+        }, indent=2))
+
+
 def _handle_theme_cli(args):
     theme = normalize_seasonal_theme(args[0] if args else 'black_friday')
     tk_path = HOME / 'ticker.json'
@@ -3903,6 +3974,8 @@ def main():
         _handle_joke_cli(sys.argv[2:])
     elif command == 'theme':
         _handle_theme_cli(sys.argv[2:])
+    elif command in ('captions', 'caption', 'subtitles'):
+        _handle_captions_cli(sys.argv[2:])
     elif command == 'mark-set':
         update_state(manual_set_start_epoch=time.time())
         print(f'Set start marker recorded at {now()}. Run "box2-stream clip [label]" right after your set!')

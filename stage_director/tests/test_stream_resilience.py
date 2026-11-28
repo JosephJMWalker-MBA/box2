@@ -1,6 +1,7 @@
 """Unit tests for Stage Director zero-drop stream resilience, marathon mode, auto-ducking audio, rehearsal & clipping."""
 import json
 import os
+from pathlib import Path
 import tempfile
 import time
 import unittest
@@ -629,6 +630,71 @@ class StreamResilienceTests(unittest.TestCase):
         target_2am, cmds_2am = sched.step("spotify", players_paused, decs_paused, now_mono=200.0)
         self.assertEqual(target_2am, "spotify")
         self.assertIn(("spotify", "Play"), cmds_2am)
+
+    def test_live_standup_captions_layout_fade_hallucinations_and_srt_export(self):
+        """Verifies stand-up 2-line layout + active highlight, hallucination guard, 2.5s fade, and .srt clip export."""
+        b2s = _load_b2s()
+        cap = b2s.box2_captions
+
+        # 1. Anti-hallucination filter blocks Whisper silence artifacts while allowing real punchlines
+        self.assertTrue(cap.is_whisper_hallucination("Thank you for watching!"))
+        self.assertTrue(cap.is_whisper_hallucination("Yeah. Yeah. Yeah. Yeah. Yeah."))
+        self.assertFalse(cap.is_whisper_hallucination("My family asked what I'm bringing to Thanksgiving dinner."))
+
+        # 2. Rolling 2-line punchy layout caps visible words and highlights the newest 3 words in Stage Gold
+        lines, visible = cap.layout_standup_lines(
+            "My family asked what I'm bringing to Thanksgiving dinner and apparently unresolved tension wasn't on the list",
+            max_words_visible=12,
+            max_chars_per_line=34,
+            active_tail_words=3,
+        )
+        self.assertEqual(len(lines), 2)
+        flat = [item for ln in lines for item in ln]
+        self.assertEqual(len(flat), 12)
+        self.assertEqual([w for w, hi in flat if hi], ["on", "the", "list"])
+        self.assertIn("unresolved tension", visible)
+
+        # 3. 2.5s silence hold + 0.40s smooth fade-out + actual canvas sprite rendering
+        eng = cap.LiveCaptionEngine(enabled=False)
+        try:
+            ov = cap.LiveCaptionOverlay(eng, config_path="", state_path="", base_w=1280, base_h=720)
+            snap = cap.CaptionSnapshot(
+                text="Hey thanks for coming out tonight guys!",
+                updated_mono=10.2,
+                last_speech_mono=10.0,
+                is_final=False,
+                utterance_id=1,
+            )
+            self.assertEqual(ov.compute_opacity(snap, 12.0), 1.0)     # within 2.5s hold -> 100% opaque
+            self.assertGreater(ov.compute_opacity(snap, 12.7), 0.1)   # mid-fade
+            self.assertEqual(ov.compute_opacity(snap, 13.1), 0.0)     # after 2.5 + 0.4s -> completely gone!
+
+            if HAS_NUMPY:
+                eng._snapshot = snap
+                ov.enabled = True
+                canvas = np.zeros((720, 1280, 3), dtype=np.uint8)
+                # Off-stage (`is_performer_framed=False`) -> never draws!
+                self.assertFalse(ov.draw(canvas, is_performer_framed=False, now_mono=11.0))
+                self.assertEqual(int(np.sum(canvas)), 0)
+                # On-stage (`is_performer_framed=True`) -> renders crisp bottom-center stand-up caption!
+                self.assertTrue(ov.draw(canvas, is_performer_framed=True, now_mono=11.0))
+                self.assertGreater(int(np.sum(canvas[520:710, 200:1080])), 50000)
+        finally:
+            eng.stop()
+
+        # 4. Timestamped `captions.jsonl` -> `.srt` clip export
+        with tempfile.TemporaryDirectory() as tmp:
+            log_p = Path(tmp) / "captions.jsonl"
+            mp4_p = Path(tmp) / "clip_20261127_test.mp4"
+            mp4_p.write_bytes(b"fake")
+            cap.append_caption_log(log_p, 1002.4, 1005.9, "I'm going to talk to other animals.")
+            cap.append_caption_log(log_p, 1006.3, 1008.8, "Hey, thanks for coming up guys.")
+            srt_p = cap.export_srt_for_clip(mp4_p, clip_start_epoch=1000.0, clip_end_epoch=1015.0, captions_log=log_p)
+            self.assertIsNotNone(srt_p)
+            srt_txt = srt_p.read_text(encoding="utf-8")
+            self.assertIn("00:00:02,400 --> 00:00:05,900", srt_txt)
+            self.assertIn("I'm going to talk to other animals.", srt_txt)
+            self.assertIn("00:00:06,300 --> 00:00:08,800", srt_txt)
 
 
 if __name__ == "__main__":
